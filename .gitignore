@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+data/documents/*
+!data/documents/.gitkeep
+.pytest_cache/
+*.egg-info/
+README.md
+.env.example
