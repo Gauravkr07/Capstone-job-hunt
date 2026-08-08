@@ -3,6 +3,19 @@ from pydantic import BaseModel, HttpUrl, constr
 from typing import Optional
 
 
+class ResumeFetchRequest(BaseModel):
+    resume_text: Optional[str] = None
+    resume_url: Optional[str] = None
+
+
+class ResumeFetchResponse(BaseModel):
+    username: str
+    skills: list[str]
+    experience: Optional[int] = None
+    industry_type: Optional[str] = None
+    vector: Optional[list[float]] = None
+
+
 # PasswordStr = constr(min_length=8, max_length=64, regex=r"^[a-zA-Z0-9]+$")
 
 

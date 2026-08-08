@@ -2,9 +2,8 @@ from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from config import DATABASE_URL
 from db.models import Base
-
-DATABASE_URL = "postgresql+asyncpg://gauravsingh:root@localhost:5432/capstone_db"
 
 
 engine = create_async_engine(

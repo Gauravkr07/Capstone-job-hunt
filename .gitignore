@@ -3,6 +3,8 @@ __pycache__/
 .venv/
 venv/
 .env
+dev.env
+env.env
 data/documents/*
 !data/documents/.gitkeep
 .pytest_cache/
