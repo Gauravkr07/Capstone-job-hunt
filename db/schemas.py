@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, HttpUrl, constr
+from pydantic import BaseModel, HttpUrl
 from typing import Optional
 
 
@@ -16,21 +16,50 @@ class ResumeFetchResponse(BaseModel):
     vector: Optional[list[float]] = None
 
 
-# PasswordStr = constr(min_length=8, max_length=64, regex=r"^[a-zA-Z0-9]+$")
-
-
 class JobCreate(BaseModel):
     jd: str
     company_name: str
     position: str
+    location: Optional[list[str]] = None
+    source: Optional[str] = None
+    source_url: Optional[str] = None
+    external_job_id: Optional[str] = None
+    employment_type: Optional[str] = None
+    salary_min: Optional[int] = None
+    salary_max: Optional[int] = None
+    salary_currency: Optional[str] = None
+
+
+class JobRawTextCreate(BaseModel):
+    raw_text: str
+    source: Optional[str] = None
+    source_url: Optional[str] = None
+    external_job_id: Optional[str] = None
 
 
 class JobResponse(BaseModel):
     id: int
-    jd: str
+    title: str
     company_name: str
-    position: str
+    description: str
+    location: Optional[list[str]] = None
+    remote_type: Optional[str] = None
+    employment_type: Optional[str] = None
+    experience_min: Optional[int] = None
+    experience_max: Optional[int] = None
+    industry_type: Optional[str] = None
+    required_skills: list[str] = []
+    preferred_skills: list[str] = []
+    status: str
+    is_duplicate: bool = False
     created_at: datetime
+
+
+class JobListResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    jobs: list[JobResponse]
 
 
 class UserCreate(BaseModel):
@@ -50,9 +79,6 @@ class UserResponse(BaseModel):
     linkedin_url: Optional[HttpUrl] = None
     leetcode_url: Optional[HttpUrl] = None
     hackerrank_url: Optional[HttpUrl] = None
-
-    # class Config:
-    #     orm_mode = True
 
 
 class LoginResponse(BaseModel):
