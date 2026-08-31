@@ -96,6 +96,24 @@ def get_job_vector_point(job_id: int) -> dict[str, Any] | None:
     return {"id": point.id, "vector": point.vector, "payload": point.payload}
 
 
+def get_job_vector_points(job_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """
+    Batched version of get_job_vector_point -- one Qdrant round-trip for many
+    jobs instead of one per job. Returns {job_id: {vector, payload}}, omitting
+    any job_id with no stored point.
+    """
+    if not job_ids:
+        return {}
+
+    client = _get_client()
+    _ensure_collection(JOB_POSTINGS_COLLECTION)
+
+    ids = [_job_point_id(job_id) for job_id in job_ids]
+    points = client.retrieve(collection_name=JOB_POSTINGS_COLLECTION, ids=ids, with_vectors=True)
+
+    return {point.payload["job_id"]: {"vector": point.vector, "payload": point.payload} for point in points}
+
+
 def upsert_resume_vector(
     username: str,
     vector: list[float],

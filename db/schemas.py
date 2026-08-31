@@ -55,11 +55,43 @@ class JobResponse(BaseModel):
     created_at: datetime
 
 
+class AtsCheckRequest(BaseModel):
+    job_id: int
+
+
+class AtsCheckResponse(BaseModel):
+    job_id: int
+    vector_score: float
+    skill_score: float
+    fused_score: float
+    has_skill_data: bool
+    matched_required_skills: list[str]
+    missing_required_skills: list[str]
+    matched_preferred_skills: list[str]
+    missing_preferred_skills: list[str]
+
+
 class JobListResponse(BaseModel):
     total: int
     limit: int
     offset: int
     jobs: list[JobResponse]
+
+
+class JobRecommendation(BaseModel):
+    job: JobResponse
+    vector_score: float
+    skill_score: float
+    fused_score: float
+    has_skill_data: bool
+    matched_required_skills: list[str]
+    missing_required_skills: list[str]
+    matched_preferred_skills: list[str]
+    missing_preferred_skills: list[str]
+
+
+class JobRecommendationsResponse(BaseModel):
+    recommendations: list[JobRecommendation]
 
 
 class UserCreate(BaseModel):

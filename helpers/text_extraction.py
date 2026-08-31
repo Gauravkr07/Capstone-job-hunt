@@ -1,7 +1,43 @@
 import re
+import unicodedata
 from functools import lru_cache
 
 from helpers.constant import INDUSTRY_PATTERNS, SKILL_KEYWORDS
+
+# Smart/curly quotes and dashes commonly introduced by copy-pasting from web
+# pages or word processors -- normalized to their plain ASCII equivalents so
+# downstream regex matching (label lines, "<Company> is a..." patterns, etc.)
+# isn't silently defeated by a different quote character.
+_QUOTE_AND_DASH_MAP = {
+    "‘": "'", "’": "'", "‚": "'", "‛": "'",
+    "“": '"', "”": '"', "„": '"', "‟": '"',
+    "–": "-", "—": "-", "−": "-",
+}
+
+
+def sanitize_raw_text(text: str) -> str:
+    """
+    Strip/normalize copy-paste artifacts from raw job-posting or resume text
+    before extraction: smart quotes/dashes -> ASCII, zero-width and other
+    invisible control characters removed, non-breaking spaces -> regular
+    spaces. Does not remove legitimate punctuation, accented characters (e.g.
+    "CYURÆ"), or newlines -- only characters that are invisible or that would
+    silently break exact-string/regex matching.
+    """
+    if not text:
+        return text
+
+    for smart_char, plain_char in _QUOTE_AND_DASH_MAP.items():
+        text = text.replace(smart_char, plain_char)
+
+    # Non-breaking space and other Unicode space variants -> regular space.
+    text = "".join(" " if unicodedata.category(ch) == "Zs" and ch != " " else ch for ch in text)
+
+    # Zero-width characters and other invisible-but-non-whitespace control
+    # chars (category "Cf" = "format", e.g. zero-width space/joiner, BOM).
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+
+    return text
 
 
 def normalize_text(text: str) -> str:
