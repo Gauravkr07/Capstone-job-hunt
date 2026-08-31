@@ -17,6 +17,7 @@ and scores/ranks job matches against a candidate's resume.
 | Vector storage | **Qdrant** | Similarity search over embeddings: resume profiles, resume section chunks, job postings. |
 | Embeddings | **sentence-transformers** (`all-MiniLM-L6-v2`, local, free, 384-dim) | Turns resume/job summaries and text chunks into vectors, all in one shared space so resumes and JDs are directly comparable. |
 | Structured JD extraction | **Groq API** (optional, hosted LLM) | Extracts title/company/location/skills/experience from raw, unstructured job postings. Falls back to regex/keyword heuristics automatically if no key is configured or the call fails. |
+| RAG match explanation | **Groq API** + Qdrant retrieval | Retrieves the resume chunks most relevant to a job, then generates a grounded natural-language explanation of the match using only that retrieved text — see `POST /jobs/atsCheck` (`include_explanation`) and `POST /jobs/explainMatch`. |
 | File parsing | **pypdf**, **python-docx** | Extracts text from uploaded PDF/DOCX resumes. |
 | Auth | Custom JWT (HMAC-SHA256, no external auth library) | `middleware/auth.py` — stateless bearer-token auth. |
 | Containerization | **Docker Compose** | Runs `postgres`, `qdrant`, and `fastapi` together. |
@@ -314,9 +315,10 @@ diluted by a meaningless zero (`has_skill_data: false` signals this case).
 
 Score the caller's resume against one specific job.
 
-| Field | Type | Required |
-|---|---|---|
-| `job_id` | integer | yes |
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `job_id` | integer | yes | |
+| `include_explanation` | boolean | no (default `false`) | When `true`, also runs the RAG-based match explanation (see below) and attaches it to the response. Adds a network round-trip + LLM latency, so it's opt-in — the numeric score alone stays fast by default. |
 
 **Response (`AtsCheckResponse`):**
 
@@ -331,8 +333,44 @@ Score the caller's resume against one specific job.
 | `missing_required_skills` | list[string] |
 | `matched_preferred_skills` | list[string] |
 | `missing_preferred_skills` | list[string] |
+| `explanation` | object or null | Present only if `include_explanation: true` and an LLM call succeeded. Shape: `{summary, supporting_points: [string], gaps: [string]}`. |
+| `retrieved_chunks` | list[object] | Present only if `include_explanation: true`. Each: `{section, text, score}` — the actual resume excerpts the explanation was grounded in. |
 
 404 if the caller has no resume yet, or the job doesn't exist.
+
+### `POST /jobs/explainMatch`
+
+Standalone RAG-based match explanation — same explanation logic as
+`atsCheck`'s `include_explanation` flag, but without the numeric score. Use
+this when you only need the explanation and want to skip computing
+`vector_score`/`skill_score`.
+
+| Field | Type | Required |
+|---|---|---|
+| `job_id` | integer | yes |
+
+**How it works (genuine retrieval-augmented generation, not just
+retrieval-for-ranking like the endpoints above):**
+1. **Retrieve** — vector search over the caller's `resume_chunks`, scoped to
+   this job's embedding, pulling the most relevant excerpts (e.g. the
+   experience section that mentions the exact required skills).
+2. **Generate** — Groq is given only those retrieved excerpts plus the job's
+   required/preferred skills, and asked to write a grounded explanation
+   (summary, supporting evidence, gaps) without inventing anything not
+   present in the excerpts.
+
+**Response (`ExplainMatchResponse`):**
+
+| Field | Type | Notes |
+|---|---|---|
+| `explanation` | object or null | `{summary, supporting_points: [string], gaps: [string]}`. Null if no `GROQ_API_KEY` is configured or the call fails. |
+| `retrieved_chunks` | list[object] | Each `{section, text, score}` — the raw evidence, always returned even if `explanation` is null. |
+
+404 if the caller has no resume yet, or the job doesn't exist.
+
+**Note:** `GET /jobs/recommendations` deliberately never triggers this
+explanation logic (it would mean one LLM call per candidate, up to 50 per
+request) — it only uses the fast numeric scoring.
 
 ### `GET /jobs/recommendations`
 
@@ -395,3 +433,8 @@ companies ──< jobs ──< job_skills >── skills
   skill-overlap formula** are deferred — the current fused-score approach
   covers the core use case; revisit if match quality needs improvement at
   larger scale.
+- **RAG match explanation retrieves only from the resume side** — it finds
+  the resume chunks most relevant to a job, but doesn't do the reverse
+  (retrieving the most relevant *job* excerpts for a resume-wide query) or
+  multi-query retrieval. Sufficient for the current "why does my resume
+  match this job" use case.
