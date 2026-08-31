@@ -8,7 +8,11 @@ logger = get_logger("llm_jd_extractor")
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-_SYSTEM_PROMPT = """You extract structured data from raw job posting text. \
+_SYSTEM_PROMPT = """You are an expert job-description parser: a precise information-extraction \
+assistant specialized in reading raw, unstructured job postings (any format, any source) and \
+extracting structured data from them with zero guesswork.
+
+Extract structured data from the raw job posting text you are given. \
 Return ONLY a JSON object matching this exact shape, no prose, no markdown fences:
 
 {
