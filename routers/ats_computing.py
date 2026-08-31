@@ -3,9 +3,9 @@ from fastapi.security import HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.connection import get_session
-from db.schemas import AtsCheckRequest, AtsCheckResponse, JobRecommendationsResponse
+from db.schemas import AtsCheckRequest, AtsCheckResponse, ExplainMatchRequest, ExplainMatchResponse, JobRecommendationsResponse
 from helpers.auth_context import require_username
-from services.ats_service import compute_ats_match, get_job_recommendations
+from services.ats_service import compute_ats_match, explain_match, get_job_recommendations
 from services.job_service import build_job_response, get_job_by_id
 
 router = APIRouter(prefix="/jobs", tags=["ats"])
@@ -32,13 +32,22 @@ async def check_ats_match(
     fused_score falls back to vector_score alone rather than being diluted by
     a meaningless zero.
 
+    Set `include_explanation: true` to also run the RAG-based match
+    explanation (retrieves resume chunks + calls Groq) and attach it as
+    `explanation`/`retrieved_chunks` -- this adds a network round-trip and
+    LLM latency on top of the otherwise-fast numeric scoring, so it defaults
+    to false. For explanation-only use without the numeric score, see
+    POST /jobs/explainMatch instead.
+
     Requires the caller to have already submitted a resume (POST /jobs/resume
     or /jobs/resume/upload) and the target job to already be ingested.
     """
     username = require_username(request)
 
     try:
-        result = await compute_ats_match(session, username, payload.job_id)
+        result = await compute_ats_match(
+            session, username, payload.job_id, include_explanation=payload.include_explanation
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -52,6 +61,8 @@ async def check_ats_match(
         "missing_required_skills": result.missing_required_skills,
         "matched_preferred_skills": result.matched_preferred_skills,
         "missing_preferred_skills": result.missing_preferred_skills,
+        "explanation": result.explanation,
+        "retrieved_chunks": result.retrieved_chunks,
     }
 
 
@@ -104,3 +115,38 @@ async def get_recommendations(
         )
 
     return {"recommendations": recommendations}
+
+
+@router.post("/explainMatch", response_model=ExplainMatchResponse, dependencies=[Depends(security)])
+async def explain_job_match(
+    payload: ExplainMatchRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Retrieval-augmented explanation of why the caller's resume matches a
+    specific job -- genuine RAG, not just retrieval-for-ranking like
+    /jobs/atsCheck and /jobs/recommendations.
+
+    1. Retrieve: vector search over the caller's resume_chunks, scoped to
+       this job's embedding, pulling the most relevant excerpts (e.g. the
+       experience section that mentions the exact required skills).
+    2. Generate: Groq is given only those retrieved excerpts plus the job's
+       required/preferred skills, and asked to write a grounded explanation
+       -- summary, supporting evidence, and gaps -- without inventing
+       anything not present in the excerpts.
+
+    `explanation` is null if no GROQ_API_KEY is configured or the LLM call
+    fails; `retrieved_chunks` (the raw evidence) is still returned either way.
+
+    Requires the caller to have already submitted a resume and the target
+    job to already be ingested.
+    """
+    username = require_username(request)
+
+    try:
+        result = await explain_match(session, username, payload.job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return result

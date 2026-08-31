@@ -55,8 +55,21 @@ class JobResponse(BaseModel):
     created_at: datetime
 
 
+class MatchExplanation(BaseModel):
+    summary: Optional[str] = None
+    supporting_points: list[str] = []
+    gaps: list[str] = []
+
+
+class RetrievedChunk(BaseModel):
+    section: Optional[str] = None
+    text: Optional[str] = None
+    score: Optional[float] = None
+
+
 class AtsCheckRequest(BaseModel):
     job_id: int
+    include_explanation: bool = False
 
 
 class AtsCheckResponse(BaseModel):
@@ -69,6 +82,17 @@ class AtsCheckResponse(BaseModel):
     missing_required_skills: list[str]
     matched_preferred_skills: list[str]
     missing_preferred_skills: list[str]
+    explanation: Optional[MatchExplanation] = None
+    retrieved_chunks: list[RetrievedChunk] = []
+
+
+class ExplainMatchRequest(BaseModel):
+    job_id: int
+
+
+class ExplainMatchResponse(BaseModel):
+    explanation: Optional[MatchExplanation] = None
+    retrieved_chunks: list[RetrievedChunk] = []
 
 
 class JobListResponse(BaseModel):
