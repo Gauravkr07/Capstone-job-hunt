@@ -4,7 +4,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.connection import get_session
 from db.schemas import JobCreate, JobListResponse, JobRawTextCreate, JobResponse
-from db.vector_store import get_job_vector_point
 from helpers.jd_scraper import parse_raw_job_posting
 from services.job_service import build_job_response, ingest_job, list_jobs
 
@@ -84,7 +83,7 @@ async def get_job(request: Request):
     return {"message": f"Details of job {request.state.user}"}
 
 
-@router.get("", response_model=JobListResponse)
+@router.get("", response_model=JobListResponse,dependencies=[Depends(security)])
 async def get_jobs(
     status: str | None = Query(default=None, description="Filter by job status, e.g. ACTIVE"),
     industry_type: str | None = Query(default=None, description="Filter by industry, e.g. fintech"),

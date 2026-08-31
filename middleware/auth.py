@@ -18,7 +18,8 @@ PUBLIC_PATHS = {
     "/openapi.json",
     "/login",
     "/register",
-    "/health"
+    "/health",
+    "/upload",
 }
 
 

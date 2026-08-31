@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Job Posting Upload</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+  h1 { font-size: 1.3rem; }
+  fieldset { margin-bottom: 24px; padding: 16px; border: 1px solid #ddd; border-radius: 8px; }
+  legend { font-weight: 600; padding: 0 8px; }
+  label { display: block; margin-top: 12px; font-size: 0.9rem; font-weight: 600; }
+  input, textarea { width: 100%; box-sizing: border-box; padding: 8px; margin-top: 4px; font-family: inherit; font-size: 0.95rem; border: 1px solid #ccc; border-radius: 4px; }
+  textarea { min-height: 260px; resize: vertical; }
+  button { margin-top: 16px; padding: 10px 20px; font-size: 0.95rem; border: none; border-radius: 4px; background: #2563eb; color: white; cursor: pointer; }
+  button:disabled { background: #93a3b8; cursor: not-allowed; }
+  #status { margin-top: 12px; font-size: 0.9rem; white-space: pre-wrap; }
+  #status.error { color: #b91c1c; }
+  #status.success { color: #15803d; }
+  pre { background: #f5f5f5; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+
+<h1>Job Posting Upload</h1>
+<p>Paste raw job description text below and submit -- no manual JSON escaping needed, the browser handles it.</p>
+
+<fieldset>
+  <legend>1. Log in</legend>
+  <label for="username">Username</label>
+  <input id="username" autocomplete="username">
+  <label for="password">Password</label>
+  <input id="password" type="password" autocomplete="current-password">
+  <button id="loginBtn">Log in</button>
+  <div id="loginStatus"></div>
+</fieldset>
+
+<fieldset id="jdSection">
+  <legend>2. Submit job posting</legend>
+  <label for="rawText">Raw job description text</label>
+  <textarea id="rawText" placeholder="Paste the full job posting text here, including line breaks -- formatting is preserved automatically."></textarea>
+  <label for="source">Source (optional)</label>
+  <input id="source" placeholder="e.g. LinkedIn">
+  <label for="sourceUrl">Source URL (optional)</label>
+  <input id="sourceUrl" placeholder="e.g. https://...">
+  <button id="submitBtn">Submit job posting</button>
+  <div id="status"></div>
+</fieldset>
+
+<div id="result"></div>
+
+<script>
+let jwt = null;
+
+const loginBtn = document.getElementById('loginBtn');
+const loginStatus = document.getElementById('loginStatus');
+const submitBtn = document.getElementById('submitBtn');
+const status = document.getElementById('status');
+const result = document.getElementById('result');
+
+loginBtn.addEventListener('click', async () => {
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  loginStatus.textContent = 'Logging in...';
+  loginStatus.className = '';
+
+  try {
+    const res = await fetch('/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      loginStatus.textContent = 'Login failed: ' + (data.detail || res.status);
+      loginStatus.className = 'error';
+      return;
+    }
+    jwt = data.jwt;
+    loginStatus.textContent = 'Logged in as ' + username;
+    loginStatus.className = 'success';
+  } catch (err) {
+    loginStatus.textContent = 'Login error: ' + err;
+    loginStatus.className = 'error';
+  }
+});
+
+submitBtn.addEventListener('click', async () => {
+  if (!jwt) {
+    status.textContent = 'Log in first.';
+    status.className = 'error';
+    return;
+  }
+
+  const rawText = document.getElementById('rawText').value;
+  if (!rawText.trim()) {
+    status.textContent = 'Paste job posting text first.';
+    status.className = 'error';
+    return;
+  }
+
+  const payload = {
+    raw_text: rawText,
+    source: document.getElementById('source').value || undefined,
+    source_url: document.getElementById('sourceUrl').value || undefined,
+  };
+
+  submitBtn.disabled = true;
+  status.textContent = 'Submitting...';
+  status.className = '';
+  result.innerHTML = '';
+
+  try {
+    const res = await fetch('/jobs/scrapeJobPosting', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + jwt,
+      },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+
+    if (!res.ok) {
+      status.textContent = 'Error (' + res.status + '): ' + (data.detail || JSON.stringify(data));
+      status.className = 'error';
+    } else {
+      status.textContent = 'Success.';
+      status.className = 'success';
+      result.innerHTML = '<pre>' + JSON.stringify(data, null, 2).replace(/</g, '&lt;') + '</pre>';
+    }
+  } catch (err) {
+    status.textContent = 'Request failed: ' + err;
+    status.className = 'error';
+  } finally {
+    submitBtn.disabled = false;
+  }
+});
+</script>
+
+</body>
+</html>

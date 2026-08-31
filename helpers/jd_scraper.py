@@ -4,7 +4,7 @@ from typing import Any
 
 from helpers.llm_jd_extractor import extract_job_fields_via_llm
 from helpers.logger import get_logger
-from helpers.text_extraction import _keyword_in, extract_skills, infer_industry_type, normalize_text
+from helpers.text_extraction import _keyword_in, extract_skills, infer_industry_type, normalize_text, sanitize_raw_text
 
 logger = get_logger("jd_scraper")
 
@@ -101,6 +101,23 @@ _HIRING_TITLE_RE = re.compile(
 MAX_TITLE_LENGTH = 255
 MAX_COMPANY_NAME_LENGTH = 255
 
+# Generic section headers that some JDs use in place of an actual title.
+# Neither the LLM nor the regex heuristics should accept these as a real
+# title -- a job with no stated title should fail extraction (same as a job
+# with no stated company), not silently store a useless placeholder.
+_GENERIC_TITLE_PHRASES = {
+    "about the job", "about this job", "about this role", "job description",
+    "job details", "job summary", "job purpose", "the opportunity", "the role",
+    "role overview", "position overview", "overview", "summary", "description",
+}
+
+
+def is_generic_title(title: str | None) -> bool:
+    if not title:
+        return False
+    normalized = re.sub(r"[^a-z ]", "", title.strip().lower())
+    return normalized in _GENERIC_TITLE_PHRASES
+
 
 def _split_locations(raw: str) -> list[str]:
     parts = re.split(r"\s*(?:,|/|;|\band\b|\bor\b)\s*", raw, flags=re.IGNORECASE)
@@ -110,11 +127,14 @@ def _split_locations(raw: str) -> list[str]:
 def _looks_like_title_line(line: str) -> bool:
     """
     A plausible job-title line is short, single-sentence, and doesn't read like
-    marketing/boilerplate prose (which real JD postings often lead with).
+    marketing/boilerplate prose (which real JD postings often lead with) or a
+    generic section header like "About the job".
     """
     if not line or len(line) > 100:
         return False
     if line.count(".") > 1:
+        return False
+    if is_generic_title(line):
         return False
     word_count = len(line.split())
     return 1 <= word_count <= 12
@@ -176,17 +196,15 @@ def _parse_title_company_location(text: str) -> tuple[str | None, str | None, li
 
     if title is None:
         # Scan the first few lines for one that looks like a plausible title,
-        # rather than blindly taking line 1 (which may be a boilerplate paragraph).
+        # rather than blindly taking line 1 (which may be a boilerplate
+        # paragraph or a generic section header like "About the job"). If
+        # nothing looks title-like, title stays None -- callers should treat
+        # that as "no title found" rather than accepting a guess, the same
+        # way a missing company name is treated as extraction failure.
         for line in lines[:15]:
             if line != company and _looks_like_title_line(line):
                 title = line
                 break
-
-    if title is None and lines:
-        # Nothing looked title-like; fall back to the first line, truncated to fit.
-        first_line = lines[0]
-        if first_line != company:
-            title = first_line[:MAX_TITLE_LENGTH]
 
     if title:
         title = title[:MAX_TITLE_LENGTH]
@@ -210,6 +228,8 @@ async def parse_raw_job_posting(raw_text: str) -> dict[str, Any]:
     if not raw_text or not raw_text.strip():
         raise ValueError("Job posting text is empty")
 
+    raw_text = sanitize_raw_text(raw_text)
+
     llm_result = await extract_job_fields_via_llm(raw_text)
 
     if llm_result is None:
@@ -222,7 +242,15 @@ async def parse_raw_job_posting(raw_text: str) -> dict[str, Any]:
     # source (LLM unavailable) or to fill in whatever the LLM didn't find.
     regex_title, regex_company, regex_location = _parse_title_company_location(raw_text)
 
-    title = (llm_result.get("title") if llm_result else None) or regex_title
+    llm_title = llm_result.get("title") if llm_result else None
+    if is_generic_title(llm_title):
+        logger.info("LLM title %r is a generic section header, not a real title; discarding", llm_title)
+        llm_title = None
+
+    title = llm_title or regex_title
+    if is_generic_title(title):
+        title = None
+
     company_name = (llm_result.get("company_name") if llm_result else None) or regex_company
     location = (llm_result.get("location") if llm_result else None) or regex_location
 
@@ -273,6 +301,7 @@ def scrape_job_description(
     if not jd_text or not jd_text.strip():
         raise ValueError("Job description text is empty")
 
+    jd_text = sanitize_raw_text(jd_text)
     cleaned = clean_description(jd_text)
     normalized = normalize_text(cleaned)
 
