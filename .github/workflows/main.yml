@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install CPU-only torch first
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install remaining dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check the app imports cleanly
+        run: python -c "import main"
+        env:
+          POSTGRES_USER: fake
+          POSTGRES_PASSWORD: fake
+          POSTGRES_DB: fake
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: "5432"
+          DATABASE_URL: postgresql+asyncpg://fake:fake@localhost:5432/fake
+          QDRANT_URL: http://localhost:6333
+
+      - name: Build the Docker image
+        run: docker build -t capstone-job-hunt:ci .
