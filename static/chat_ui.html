@@ -114,7 +114,7 @@
       <h3>Connection settings</h3>
       <div class="field">
         <label>API base URL</label>
-        <input id="api-base" value="http://localhost:8000" />
+        <input id="api-base" placeholder="window.location.origin" />
       </div>
       <div class="field">
         <label>Username</label>
@@ -140,7 +140,10 @@
       const targetUserSelect = document.getElementById('target-user-select');
 
       const state = {
-        apiBase: localStorage.getItem('jobhunt_api_base') || 'http://localhost:8000',
+        // Defaults to the page's own origin -- this page and the API are
+        // served by the same FastAPI app, so this works unchanged whether
+        // it's opened via localhost or a deployed URL (e.g. Render).
+        apiBase: localStorage.getItem('jobhunt_api_base') || window.location.origin,
         username: localStorage.getItem('jobhunt_username') || 'demo-user',
         targetUsername: '',
         conversationId: null,
