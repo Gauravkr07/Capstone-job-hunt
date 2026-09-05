@@ -9,6 +9,7 @@ from middleware.auth import AuthMiddleware
 from middleware.logging import LoggingMiddleware
 from routers.ats_computing import router as ats_router
 from routers.auth import router as auth_router
+from routers.chatbot_flow import router as chatbot_router
 from routers.job import router as job_router
 from routers.resume_opr import router as resume_router
 
@@ -17,6 +18,7 @@ app.add_middleware(TrustedHostMiddleware, allowed_hosts=["*"])
 app.add_middleware(AuthMiddleware)
 app.add_middleware(LoggingMiddleware)
 app.include_router(auth_router)
+app.include_router(chatbot_router)
 app.include_router(resume_router)
 app.include_router(job_router)
 app.include_router(ats_router)

@@ -277,42 +277,6 @@ def search_resume_chunks(
     return [{"score": point.score, **point.payload} for point in results.points]
 
 
-def search_similar_resumes(
-    vector: list[float],
-    limit: int = 10,
-    industry_type: str | None = None,
-) -> list[dict[str, Any]]:
-    if not vector:
-        logger.warning("Skipping Qdrant search: empty query vector")
-        return []
-
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
-
-    client = _get_client()
-    _ensure_collection(RESUME_COLLECTION)
-    query_filter = None
-    if industry_type:
-        query_filter = Filter(must=[FieldCondition(key="industry_type", match=MatchValue(value=industry_type))])
-
-    start = time.perf_counter()
-    results = client.query_points(
-        collection_name=RESUME_COLLECTION,
-        query=vector,
-        query_filter=query_filter,
-        limit=limit,
-    )
-    duration_ms = (time.perf_counter() - start) * 1000
-    logger.info(
-        "Searched %s (industry_filter=%s, limit=%d) -> %d results in %.1fms",
-        RESUME_COLLECTION,
-        industry_type,
-        limit,
-        len(results.points),
-        duration_ms,
-    )
-    return [{"score": point.score, **point.payload} for point in results.points]
-
-
 def upsert_job_vector(
     job_id: int,
     vector: list[float],

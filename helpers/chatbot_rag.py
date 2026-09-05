@@ -183,50 +183,6 @@ def _build_messages(
     return messages
 
 
-async def answer_user_question(
-    question: str,
-    profile: dict[str, Any],
-    resume_chunks: list[dict[str, Any]],
-    jobs: list[dict[str, Any]],
-    history: list[dict[str, str]] | None = None,
-) -> str | None:
-    """
-    Ask Groq to answer `question` grounded in the given profile/resume/job
-    context, in one shot. Returns None (never raises) when no API key is
-    configured or the call fails, so callers can fall back to a canned
-    response. Prefer stream_answer_user_question for interactive chat.
-    """
-    if not GROQ_API_KEY:
-        logger.info("GROQ_API_KEY not configured; skipping RAG chatbot generation")
-        return None
-
-    import httpx
-
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": _build_messages(question, profile, resume_chunks, jobs, history),
-        "temperature": 0.3,
-    }
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(GROQ_API_URL, json=payload, headers=headers)
-            response.raise_for_status()
-    except Exception as exc:
-        logger.warning("Groq chatbot request failed: %s", exc)
-        return None
-
-    try:
-        body = response.json()
-        answer = (body["choices"][0]["message"]["content"] or "").strip()
-    except Exception as exc:
-        logger.warning("Groq chatbot returned unparseable content: %s", exc)
-        return None
-
-    return answer or None
-
-
 async def stream_answer_user_question(
     question: str,
     profile: dict[str, Any],

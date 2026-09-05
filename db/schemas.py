@@ -130,17 +130,6 @@ class UserCreate(BaseModel):
     hackerrank_url: Optional[HttpUrl] = None
 
 
-class UserResponse(BaseModel):
-    username: str
-    full_name: Optional[str] = None
-    email: Optional[str] = None
-    age: int
-    graduated: bool
-    linkedin_url: Optional[HttpUrl] = None
-    leetcode_url: Optional[HttpUrl] = None
-    hackerrank_url: Optional[HttpUrl] = None
-
-
 class LoginResponse(BaseModel):
     bearer_token: str
     jwt: str

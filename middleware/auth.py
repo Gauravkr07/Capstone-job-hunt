@@ -18,17 +18,13 @@ PUBLIC_PATHS = {
     "/openapi.json",
     "/login",
     "/register",
-    "/health",
     "/upload",
     "/chatbot",
 }
 
 PUBLIC_PREFIXES = (
-    "/chatbot/user-details",
-    "/chat/conversations",
+    "/chatbot",
     "/chat",
-    "/auth/login",
-    "/auth/register",
 )
 
 

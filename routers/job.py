@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -91,12 +91,6 @@ async def scrape_job_posting(job_data: JobRawTextCreate, session: AsyncSession =
         extracted=parsed,
     )
     return await build_job_response(session, job, is_duplicate)
-
-
-@router.get("/user", dependencies=[Depends(security)])
-async def get_job(request: Request):
-    """Debug endpoint: echoes the authenticated JWT payload for the caller. Not job-related; kept for auth troubleshooting."""
-    return {"message": f"Details of job {request.state.user}"}
 
 
 @router.get("", response_model=JobListResponse,dependencies=[Depends(security)])

@@ -68,16 +68,10 @@
 </head>
 <body>
   <div id="sidebar">
-    <div class="brand">Job<span>Match</span></div>
-    <div class="brand-sub">Résumé &amp; match assistant</div>
+    <div class="brand">Gaurav <span>Kumar</span></div>
+    <div class="brand-sub">Candidate Profile Assistant</div>
     <button id="new-chat">+ New conversation</button>
-    <button id="fetch-user-btn">Fetch my details</button>
-    <div class="field" style="margin-bottom:14px;">
-      <label style="display:block; font-size:11px; color:var(--text-dim); margin-bottom:6px;">Ask about registered user</label>
-      <select id="target-user-select" style="width:100%; background:var(--panel-raised); border:1px solid var(--line); border-radius:7px; padding:8px 8px; color:var(--text); font-size:12px;">
-        <option value="">Myself</option>
-      </select>
-    </div>
+    <button id="fetch-user-btn">Fetch profile details</button>
     <div id="convo-list"></div>
     <button id="settings-btn">⚙ Connection settings</button>
   </div>
@@ -90,19 +84,19 @@
 
     <div id="thread">
       <div id="empty-state">
-        <h2>Ask about a registered user's technical profile</h2>
-        <p>Pick "Myself" or any registered user above, then ask about their skills, experience, industry, resume content, or job matches. Personal/off-topic questions are out of scope.</p>
+        <h2>Ask about Gaurav's technical profile</h2>
+        <p>Ask about skills, experience, industry, resume content, or job matches. Personal/off-topic questions are out of scope.</p>
         <div class="suggestions">
-          <button class="suggestion" data-q="Tell me about my profile">Tell me about my profile</button>
-          <button class="suggestion" data-q="What skills are in my resume?">What skills are in my resume?</button>
-          <button class="suggestion" data-q="Summarize my user details">Summarize my user details</button>
+          <button class="suggestion" data-q="Tell me about this candidate's profile">Tell me about this candidate's profile</button>
+          <button class="suggestion" data-q="What skills are in the resume?">What skills are in the resume?</button>
+          <button class="suggestion" data-q="Summarize the candidate's experience">Summarize the candidate's experience</button>
         </div>
       </div>
     </div>
 
     <div id="composer">
       <div id="composer-inner">
-        <textarea id="msg-input" rows="1" placeholder="Ask about your profile, resume, or matches…"></textarea>
+        <textarea id="msg-input" rows="1" placeholder="Ask about skills, experience, or resume content…"></textarea>
         <button id="send-btn" title="Send">➤</button>
       </div>
       <div id="composer-hint">Enter to send · Shift+Enter for a new line</div>
@@ -137,7 +131,6 @@
       const apiBaseInput = document.getElementById('api-base');
       const jwtInput = document.getElementById('jwt-token');
       const overlay = document.getElementById('overlay');
-      const targetUserSelect = document.getElementById('target-user-select');
 
       const state = {
         // Defaults to the page's own origin -- this page and the API are
@@ -145,27 +138,8 @@
         // it's opened via localhost or a deployed URL (e.g. Render).
         apiBase: localStorage.getItem('jobhunt_api_base') || window.location.origin,
         username: localStorage.getItem('jobhunt_username') || 'demo-user',
-        targetUsername: '',
         conversationId: null,
       };
-
-      async function loadRegisteredUsers(){
-        if (!state.apiBase) return;
-        try {
-          const res = await fetch(new URL('/chatbot/users', state.apiBase + '/'));
-          if (!res.ok) return;
-          const usernames = await res.json();
-          targetUserSelect.innerHTML = '<option value="">Myself</option>' +
-            usernames.map((u) => `<option value="${u}">${u}</option>`).join('');
-          targetUserSelect.value = state.targetUsername;
-        } catch (err) {
-          console.warn('Could not load registered users:', err);
-        }
-      }
-
-      targetUserSelect.addEventListener('change', () => {
-        state.targetUsername = targetUserSelect.value;
-      });
 
       function refreshStatus(){
         const ok = !!state.apiBase;
@@ -299,12 +273,12 @@
         if (current) return;
         thread.innerHTML = `
           <div id="empty-state">
-            <h2>Ask about your résumés or matches</h2>
-            <p>This assistant can look up your profile, resume skills, and match status using the authenticated backend.</p>
+            <h2>Ask about Gaurav's technical profile</h2>
+            <p>Ask about skills, experience, industry, resume content, or job matches. Personal/off-topic questions are out of scope.</p>
             <div class="suggestions">
-              <button class="suggestion" data-q="Tell me about my profile">Tell me about my profile</button>
-              <button class="suggestion" data-q="What skills are in my resume?">What skills are in my resume?</button>
-              <button class="suggestion" data-q="Summarize my user details">Summarize my user details</button>
+              <button class="suggestion" data-q="Tell me about this candidate's profile">Tell me about this candidate's profile</button>
+              <button class="suggestion" data-q="What skills are in the resume?">What skills are in the resume?</button>
+              <button class="suggestion" data-q="Summarize the candidate's experience">Summarize the candidate's experience</button>
             </div>
           </div>`;
         document.querySelectorAll('.suggestion').forEach((b) => {
@@ -362,7 +336,6 @@
         overlay.classList.remove('open');
         refreshStatus();
         loadConversations();
-        loadRegisteredUsers();
       };
 
       function addStreamingBubble(){
@@ -426,7 +399,7 @@
           const res = await fetch(buildUserUrl('/chat/stream'), {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ message, conversation_id: state.conversationId, username: state.username, target_username: state.targetUsername || undefined }),
+            body: JSON.stringify({ message, conversation_id: state.conversationId, username: state.username }),
           });
 
           if (!res.ok || !res.body) {
@@ -471,7 +444,6 @@
       refreshStatus();
       renderEmptyState();
       loadConversations();
-      loadRegisteredUsers();
     })();
   </script>
 </body>
