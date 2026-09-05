@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Capstone Job Hunt — Assistant</title>
+  <style>
+    :root{
+      --ink:#14171C;
+      --panel:#1B1F27;
+      --panel-raised:#232833;
+      --line:#2C3140;
+      --gold:#C9A961;
+      --gold-dim:#8A7A4E;
+      --text:#E9E7E1;
+      --text-dim:#8B909C;
+      --match-high:#6FA287;
+      --match-mid:#C9A961;
+      --match-low:#B3705E;
+      --radius:10px;
+    }
+    *{box-sizing:border-box;} html,body{height:100%;}
+    body{margin:0; background:var(--ink); color:var(--text); font-family:Inter, Arial, sans-serif; display:flex; overflow:hidden;}
+    #sidebar{width:264px; background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; padding:20px 14px;}
+    .brand{font-size:19px; font-weight:600; padding:2px 8px 4px; }
+    .brand span{color:var(--gold);}
+    .brand-sub{padding:0 8px 18px; font-size:12px; color:var(--text-dim); }
+    #new-chat{background:transparent; border:1px solid var(--gold-dim); color:var(--gold); border-radius:var(--radius); padding:9px 12px; cursor:pointer; margin-bottom:16px;}
+    #fetch-user-btn{background:var(--panel-raised); border:1px solid var(--line); color:var(--text); border-radius:var(--radius); padding:9px 12px; cursor:pointer; margin-bottom:8px; font-size:12px; text-align:left;}
+    #convo-list{flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:2px;}
+    .convo-item{padding:9px 10px; border-radius:8px; font-size:13px; color:var(--text-dim); cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    .convo-item:hover{background:var(--panel-raised); color:var(--text);}
+    .convo-item.active{background:var(--panel-raised); color:var(--text); border-left:2px solid var(--gold); padding-left:8px;}
+    #settings-btn{margin-top:10px; background:none; border:none; color:var(--text-dim); font-size:12px; cursor:pointer; text-align:left; padding:8px;}
+    #main{flex:1; display:flex; flex-direction:column; min-width:0;}
+    #topbar{height:56px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; padding:0 24px; flex-shrink:0;}
+    #topbar h1{font-size:15px; color:var(--text-dim); margin:0;}
+    #status-pill{font-size:11px; color:var(--text-dim); border:1px solid var(--line); padding:4px 10px; border-radius:999px;}
+    #status-pill.live{color:var(--match-high); border-color:rgba(111,162,135,0.4);}
+    #thread{flex:1; overflow-y:auto; padding:28px 0 12px; display:flex; flex-direction:column; gap:18px;}
+    .row{display:flex; padding:0 8%;}
+    .row.user{justify-content:flex-end;}
+    .bubble{max-width:640px; padding:12px 16px; border-radius:var(--radius); font-size:14.5px; line-height:1.55;}
+    .row.user .bubble{background:var(--gold); color:#20180B; border-bottom-right-radius:3px;}
+    .row.assistant .bubble{background:var(--panel); border:1px solid var(--line); color:var(--text); border-bottom-left-radius:3px;}
+    #composer{padding:16px 8% 22px; flex-shrink:0;}
+    #composer-inner{display:flex; align-items:flex-end; gap:10px; background:var(--panel); border:1px solid var(--line); border-radius:var(--radius); padding:8px 8px 8px 16px;}
+    #msg-input{flex:1; background:none; border:none; outline:none; resize:none; color:var(--text); font-family:inherit; font-size:14.5px; line-height:1.5; max-height:160px; padding:8px 0;}
+    #msg-input::placeholder{color:var(--text-dim);}
+    #send-btn{background:var(--gold); color:#20180B; border:none; width:36px; height:36px; border-radius:8px; cursor:pointer; display:flex; align-items:center; justify-content:center;}
+    #send-btn:disabled{opacity:.35; cursor:default;}
+    #composer-hint{font-size:11px; color:var(--text-dim); text-align:center; margin-top:8px;}
+    #overlay{position:fixed; inset:0; background:rgba(10,11,14,0.6); display:none; align-items:center; justify-content:center; z-index:10;}
+    #overlay.open{display:flex;}
+    #settings-modal{background:var(--panel); border:1px solid var(--line); border-radius:12px; width:380px; padding:22px;}
+    #settings-modal h3{margin:0 0 14px;}
+    .field{margin-bottom:14px;}
+    .field label{display:block; font-size:12px; color:var(--text-dim); margin-bottom:6px;}
+    .field input{width:100%; background:var(--panel-raised); border:1px solid var(--line); border-radius:7px; padding:9px 10px; color:var(--text); font-size:13px;}
+    #settings-actions{display:flex; justify-content:flex-end; gap:8px; margin-top:6px;}
+    #settings-actions button{font-family:inherit; font-size:13px; padding:8px 14px; border-radius:7px; cursor:pointer; border:1px solid var(--line); background:none; color:var(--text-dim);}
+    #settings-save{background:var(--gold); color:#20180B; border:none; font-weight:500;}
+    .suggestions{display:flex; flex-direction:column; gap:8px; margin-top:18px;}
+    .suggestion{background:var(--panel); border:1px solid var(--line); color:var(--text-dim); padding:10px 14px; border-radius:8px; cursor:pointer; text-align:left;}
+    #empty-state{margin:auto; text-align:center; color:var(--text-dim); max-width:420px; padding:0 20px;}
+    #empty-state h2{color:var(--text); font-size:22px; margin-bottom:8px;}
+  </style>
+</head>
+<body>
+  <div id="sidebar">
+    <div class="brand">Job<span>Match</span></div>
+    <div class="brand-sub">Résumé &amp; match assistant</div>
+    <button id="new-chat">+ New conversation</button>
+    <button id="fetch-user-btn">Fetch my details</button>
+    <div class="field" style="margin-bottom:14px;">
+      <label style="display:block; font-size:11px; color:var(--text-dim); margin-bottom:6px;">Ask about registered user</label>
+      <select id="target-user-select" style="width:100%; background:var(--panel-raised); border:1px solid var(--line); border-radius:7px; padding:8px 8px; color:var(--text); font-size:12px;">
+        <option value="">Myself</option>
+      </select>
+    </div>
+    <div id="convo-list"></div>
+    <button id="settings-btn">⚙ Connection settings</button>
+  </div>
+
+  <div id="main">
+    <div id="topbar">
+      <h1 id="convo-title">New conversation</h1>
+      <span id="status-pill">not connected</span>
+    </div>
+
+    <div id="thread">
+      <div id="empty-state">
+        <h2>Ask about a registered user's technical profile</h2>
+        <p>Pick "Myself" or any registered user above, then ask about their skills, experience, industry, resume content, or job matches. Personal/off-topic questions are out of scope.</p>
+        <div class="suggestions">
+          <button class="suggestion" data-q="Tell me about my profile">Tell me about my profile</button>
+          <button class="suggestion" data-q="What skills are in my resume?">What skills are in my resume?</button>
+          <button class="suggestion" data-q="Summarize my user details">Summarize my user details</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="composer">
+      <div id="composer-inner">
+        <textarea id="msg-input" rows="1" placeholder="Ask about your profile, resume, or matches…"></textarea>
+        <button id="send-btn" title="Send">➤</button>
+      </div>
+      <div id="composer-hint">Enter to send · Shift+Enter for a new line</div>
+    </div>
+  </div>
+
+  <div id="overlay">
+    <div id="settings-modal">
+      <h3>Connection settings</h3>
+      <div class="field">
+        <label>API base URL</label>
+        <input id="api-base" value="http://localhost:8000" />
+      </div>
+      <div class="field">
+        <label>Username</label>
+        <input id="jwt-token" placeholder="demo-user" />
+      </div>
+      <div id="settings-actions">
+        <button id="settings-cancel">Cancel</button>
+        <button id="settings-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (() => {
+      const thread = document.getElementById('thread');
+      const input = document.getElementById('msg-input');
+      const sendBtn = document.getElementById('send-btn');
+      const statusPill = document.getElementById('status-pill');
+      const convoList = document.getElementById('convo-list');
+      const apiBaseInput = document.getElementById('api-base');
+      const jwtInput = document.getElementById('jwt-token');
+      const overlay = document.getElementById('overlay');
+      const targetUserSelect = document.getElementById('target-user-select');
+
+      const state = {
+        apiBase: localStorage.getItem('jobhunt_api_base') || 'http://localhost:8000',
+        username: localStorage.getItem('jobhunt_username') || 'demo-user',
+        targetUsername: '',
+        conversationId: null,
+      };
+
+      async function loadRegisteredUsers(){
+        if (!state.apiBase) return;
+        try {
+          const res = await fetch(new URL('/chatbot/users', state.apiBase + '/'));
+          if (!res.ok) return;
+          const usernames = await res.json();
+          targetUserSelect.innerHTML = '<option value="">Myself</option>' +
+            usernames.map((u) => `<option value="${u}">${u}</option>`).join('');
+          targetUserSelect.value = state.targetUsername;
+        } catch (err) {
+          console.warn('Could not load registered users:', err);
+        }
+      }
+
+      targetUserSelect.addEventListener('change', () => {
+        state.targetUsername = targetUserSelect.value;
+      });
+
+      function refreshStatus(){
+        const ok = !!state.apiBase;
+        statusPill.textContent = ok ? 'connected' : 'not connected';
+        statusPill.classList.toggle('live', ok);
+      }
+
+      function authHeaders(){
+        return {
+          'Content-Type': 'application/json',
+        };
+      }
+
+      function buildUserUrl(path){
+        const url = new URL(path, state.apiBase + '/');
+        url.searchParams.set('username', state.username);
+        return url.toString();
+      }
+
+      // Minimal renderer for the chatbot's fixed output shape: an opening
+      // line, blank-line-separated sections, **bold** labels, and "- " bullets.
+      // Escapes HTML first so user/LLM text can never inject markup.
+      function renderAssistantMarkdown(el, text){
+        const escapeHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const withBold = (s) => escapeHtml(s).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+        el.innerHTML = '';
+        const blocks = text.split(/\n\s*\n/);
+        blocks.forEach((block) => {
+          const lines = block.split('\n').filter((l) => l.trim());
+          if (!lines.length) return;
+          const isList = lines.every((l) => /^\s*-\s+/.test(l));
+          if (isList) {
+            const ul = document.createElement('ul');
+            ul.style.cssText = 'margin:4px 0; padding-left:20px;';
+            lines.forEach((l) => {
+              const li = document.createElement('li');
+              li.style.marginBottom = '3px';
+              li.innerHTML = withBold(l.replace(/^\s*-\s+/, ''));
+              ul.appendChild(li);
+            });
+            el.appendChild(ul);
+          } else {
+            lines.forEach((l) => {
+              const p = document.createElement('div');
+              p.style.marginBottom = '4px';
+              p.innerHTML = withBold(l);
+              el.appendChild(p);
+            });
+          }
+        });
+      }
+
+      function addBubble(role, text, sources){
+        const row = document.createElement('div');
+        row.className = 'row ' + role;
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        if (role === 'assistant') {
+          renderAssistantMarkdown(bubble, text);
+        } else {
+          bubble.textContent = text;
+        }
+        row.appendChild(bubble);
+        if (sources && sources.length) {
+          const src = document.createElement('div');
+          src.style.cssText = 'max-width:640px; margin-top:6px; font-size:11px; color:var(--text-dim);';
+          src.textContent = 'Sources: ' + sources.map((s) => s.title).join(', ');
+          row.appendChild(src);
+        }
+        thread.appendChild(row);
+        thread.scrollTop = thread.scrollHeight;
+      }
+
+      async function fetchUserDetails(){
+        if (!state.apiBase) {
+          overlay.classList.add('open');
+          return;
+        }
+
+        addTyping();
+        try {
+          const res = await fetch(buildUserUrl('/chatbot/user-details'), {
+            headers: authHeaders(),
+          });
+          const data = await res.json();
+          removeTyping();
+
+          if (!res.ok) {
+            addBubble('assistant', data.detail || 'Unable to fetch your account details.');
+            return;
+          }
+
+          const lines = [
+            `Username: ${data.username || 'N/A'}`,
+            `Full name: ${data.full_name || 'N/A'}`,
+            `Email: ${data.email || 'N/A'}`,
+            `Age: ${data.age ?? 'N/A'}`,
+            `Graduated: ${data.graduated ?? 'N/A'}`,
+            `LinkedIn: ${data.linkedin_url || 'N/A'}`,
+            `LeetCode: ${data.leetcode_url || 'N/A'}`,
+            `Hackerrank: ${data.hackerrank_url || 'N/A'}`,
+            `Resume skills: ${(data.resume_skills || []).join(', ') || 'No skills found'}`,
+            `Experience: ${data.experience ?? 'N/A'}`,
+            `Industry: ${data.industry_type || 'N/A'}`,
+            `Resume text available: ${data.resume_text_available ? 'Yes' : 'No'}`,
+          ];
+
+          addBubble('assistant', lines.join('\n'));
+        } catch (err) {
+          removeTyping();
+          addBubble('assistant', 'Could not fetch your user details. Check the API URL.');
+        }
+      }
+
+      function addTyping(){
+        const row = document.createElement('div');
+        row.className = 'row assistant';
+        row.id = 'typing-row';
+        row.innerHTML = '<div class="bubble">Thinking…</div>';
+        thread.appendChild(row);
+        thread.scrollTop = thread.scrollHeight;
+      }
+
+      function removeTyping(){
+        const el = document.getElementById('typing-row');
+        if (el) el.remove();
+      }
+
+      function renderEmptyState(){
+        const current = document.getElementById('empty-state');
+        if (current) return;
+        thread.innerHTML = `
+          <div id="empty-state">
+            <h2>Ask about your résumés or matches</h2>
+            <p>This assistant can look up your profile, resume skills, and match status using the authenticated backend.</p>
+            <div class="suggestions">
+              <button class="suggestion" data-q="Tell me about my profile">Tell me about my profile</button>
+              <button class="suggestion" data-q="What skills are in my resume?">What skills are in my resume?</button>
+              <button class="suggestion" data-q="Summarize my user details">Summarize my user details</button>
+            </div>
+          </div>`;
+        document.querySelectorAll('.suggestion').forEach((b) => {
+          b.onclick = () => { input.value = b.dataset.q; sendMessage(); };
+        });
+      }
+
+      async function loadConversations(){
+        if (!state.apiBase) return;
+        try {
+          const res = await fetch(buildUserUrl('/chat/conversations'), { headers: authHeaders() });
+          if (!res.ok) return;
+          const data = await res.json();
+          convoList.innerHTML = '';
+          data.forEach((item) => {
+            const el = document.createElement('div');
+            el.className = 'convo-item' + (item.id === state.conversationId ? ' active' : '');
+            el.textContent = item.title || 'Untitled';
+            el.onclick = () => openConversation(item.id, item.title);
+            convoList.appendChild(el);
+          });
+        } catch (err) {
+          console.warn('Conversations unavailable:', err);
+        }
+      }
+
+      async function openConversation(id, title){
+        state.conversationId = id;
+        document.getElementById('convo-title').textContent = title || 'Conversation';
+        thread.innerHTML = '';
+        try {
+          const res = await fetch(buildUserUrl('/chat/conversations/' + id), { headers: authHeaders() });
+          if (!res.ok) return;
+          const data = await res.json();
+          data.messages.forEach((msg) => addBubble(msg.role, msg.content));
+        } catch (err) {}
+        loadConversations();
+      }
+
+      document.getElementById('new-chat').onclick = () => {
+        state.conversationId = null;
+        document.getElementById('convo-title').textContent = 'New conversation';
+        renderEmptyState();
+        loadConversations();
+      };
+
+      document.getElementById('fetch-user-btn').onclick = fetchUserDetails;
+      document.getElementById('settings-btn').onclick = () => overlay.classList.add('open');
+      document.getElementById('settings-cancel').onclick = () => overlay.classList.remove('open');
+      document.getElementById('settings-save').onclick = () => {
+        state.apiBase = apiBaseInput.value.trim().replace(/\/$/, '');
+        state.username = (jwtInput.value || 'demo-user').trim() || 'demo-user';
+        localStorage.setItem('jobhunt_api_base', state.apiBase);
+        localStorage.setItem('jobhunt_username', state.username);
+        overlay.classList.remove('open');
+        refreshStatus();
+        loadConversations();
+        loadRegisteredUsers();
+      };
+
+      function addStreamingBubble(){
+        const row = document.createElement('div');
+        row.className = 'row assistant';
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble';
+        bubble.textContent = '';
+        row.appendChild(bubble);
+        thread.appendChild(row);
+        thread.scrollTop = thread.scrollHeight;
+        return { row, bubble };
+      }
+
+      function finalizeStreamingBubble(row, sources){
+        if (!sources || !sources.length) return;
+        const src = document.createElement('div');
+        src.style.cssText = 'max-width:640px; margin-top:6px; font-size:11px; color:var(--text-dim);';
+        src.textContent = 'Sources: ' + sources.map((s) => s.title).join(', ');
+        row.appendChild(src);
+      }
+
+      // Parses a text/event-stream body read via fetch (POST-based SSE, so
+      // the built-in EventSource -- GET only -- can't be used here).
+      async function* parseSSE(response){
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const events = buffer.split('\n\n');
+          buffer = events.pop();
+          for (const raw of events) {
+            const lines = raw.split('\n');
+            let event = 'message';
+            let data = '';
+            for (const line of lines) {
+              if (line.startsWith('event:')) event = line.slice(6).trim();
+              else if (line.startsWith('data:')) data += line.slice(5).trim();
+            }
+            if (data) yield { event, data: JSON.parse(data) };
+          }
+        }
+      }
+
+      async function sendMessage(){
+        const message = input.value.trim();
+        if (!message) return;
+        if (!state.apiBase) {
+          overlay.classList.add('open');
+          return;
+        }
+        input.value = '';
+        addBubble('user', message);
+        sendBtn.disabled = true;
+
+        let streamBubble = null;
+        try {
+          const res = await fetch(buildUserUrl('/chat/stream'), {
+            method: 'POST',
+            headers: authHeaders(),
+            body: JSON.stringify({ message, conversation_id: state.conversationId, username: state.username, target_username: state.targetUsername || undefined }),
+          });
+
+          if (!res.ok || !res.body) {
+            const data = await res.json().catch(() => ({}));
+            addBubble('assistant', data.detail || 'Could not process your request.');
+            return;
+          }
+
+          let rawText = '';
+          for await (const { event, data } of parseSSE(res)) {
+            if (event === 'meta') {
+              state.conversationId = data.conversation_id;
+            } else if (event === 'token') {
+              if (!streamBubble) streamBubble = addStreamingBubble();
+              rawText += data.delta;
+              streamBubble.bubble.textContent = rawText;
+              thread.scrollTop = thread.scrollHeight;
+            } else if (event === 'done') {
+              if (!streamBubble) streamBubble = addStreamingBubble();
+              renderAssistantMarkdown(streamBubble.bubble, data.message || rawText);
+              finalizeStreamingBubble(streamBubble.row, data.sources);
+              loadConversations();
+            }
+          }
+        } catch (err) {
+          if (!streamBubble) addBubble('assistant', 'Could not reach the backend. Check your API URL.');
+        } finally {
+          sendBtn.disabled = false;
+        }
+      }
+
+      sendBtn.onclick = sendMessage;
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault();
+          sendMessage();
+        }
+      });
+
+      apiBaseInput.value = state.apiBase;
+      if (jwtInput) jwtInput.value = state.username;
+      refreshStatus();
+      renderEmptyState();
+      loadConversations();
+      loadRegisteredUsers();
+    })();
+  </script>
+</body>
+</html>

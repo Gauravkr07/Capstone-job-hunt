@@ -1,3 +1,5 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,6 +44,17 @@ async def insert_job_description(job_data: JobCreate, session: AsyncSession = De
     return await build_job_response(session, job, is_duplicate)
 
 
+def _require_text(value: Any | None, field_name: str) -> str:
+    if value is None:
+        raise HTTPException(status_code=400, detail=f"Missing {field_name}")
+
+    text = str(value).strip()
+    if not text:
+        raise HTTPException(status_code=400, detail=f"Missing {field_name}")
+
+    return text
+
+
 @router.post("/scrapeJobPosting", response_model=JobResponse, dependencies=[Depends(security)])
 async def scrape_job_posting(job_data: JobRawTextCreate, session: AsyncSession = Depends(get_session)):
     """
@@ -63,10 +76,13 @@ async def scrape_job_posting(job_data: JobRawTextCreate, session: AsyncSession =
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    title = _require_text(parsed.get("title"), "title")
+    company_name = _require_text(parsed.get("company_name"), "company_name")
+
     job, is_duplicate = await ingest_job(
         session,
-        title=parsed.get("title", None), # type: ignore
-        company_name=parsed.get("company_name", None), # type: ignore
+        title=title,
+        company_name=company_name,
         jd_text=job_data.raw_text.strip(),
         location=parsed.get("location", None),
         source=job_data.source,

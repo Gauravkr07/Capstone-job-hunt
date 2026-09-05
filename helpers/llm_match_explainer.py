@@ -19,7 +19,10 @@ logger = get_logger("llm_match_explainer")
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-_SYSTEM_PROMPT = """You explain why a candidate's resume matches a job posting.
+_SYSTEM_PROMPT = """You are an expert technical recruiter and ATS (Applicant Tracking System) \
+analyst: a careful, evidence-based evaluator who explains why a candidate's resume matches a \
+job posting, strictly grounded in the material provided -- never overselling a candidate or \
+inventing qualifications they haven't demonstrated.
 
 You will be given:
 - The job's title, company, and required/preferred skills.

@@ -20,7 +20,16 @@ PUBLIC_PATHS = {
     "/register",
     "/health",
     "/upload",
+    "/chatbot",
 }
+
+PUBLIC_PREFIXES = (
+    "/chatbot/user-details",
+    "/chat/conversations",
+    "/chat",
+    "/auth/login",
+    "/auth/register",
+)
 
 
 class JWTError(Exception):
@@ -95,8 +104,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
 
-        # Skip authentication for public routes
+        # Skip authentication for public routes and public route prefixes
         if request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+
+        if any(request.url.path.startswith(prefix) for prefix in PUBLIC_PREFIXES):
             return await call_next(request)
 
         authorization = request.headers.get("Authorization")

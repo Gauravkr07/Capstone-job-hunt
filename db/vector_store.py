@@ -20,6 +20,34 @@ def _get_client():
     return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
 
+_PAYLOAD_INDEXES = {
+    RESUME_COLLECTION: ["industry_type"],
+    RESUME_CHUNKS_COLLECTION: ["username"],
+    JOB_POSTINGS_COLLECTION: ["status", "industry_type"],
+}
+
+
+def _ensure_payload_indexes(collection_name: str) -> None:
+    """
+    Qdrant Cloud (unlike some self-hosted defaults) rejects filtering on a
+    payload field with no index (400 Bad Request). Create keyword indexes for
+    every field this module filters by, for the given collection. Idempotent:
+    Qdrant no-ops if the index already exists.
+    """
+    from qdrant_client.models import PayloadSchemaType
+
+    client = _get_client()
+    for field_name in _PAYLOAD_INDEXES.get(collection_name, []):
+        try:
+            client.create_payload_index(
+                collection_name=collection_name,
+                field_name=field_name,
+                field_schema=PayloadSchemaType.KEYWORD,
+            )
+        except Exception as exc:
+            logger.debug("Payload index for %s.%s already exists or failed: %s", collection_name, field_name, exc)
+
+
 def _ensure_collection(collection_name: str) -> None:
     from qdrant_client.models import Distance, VectorParams
 
@@ -29,6 +57,7 @@ def _ensure_collection(collection_name: str) -> None:
             collection_name=collection_name,
             vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
         )
+    _ensure_payload_indexes(collection_name)
 
 
 def ensure_collection() -> None:
@@ -224,6 +253,7 @@ def search_resume_chunks(
     from qdrant_client.models import FieldCondition, Filter, MatchValue
 
     client = _get_client()
+    _ensure_collection(RESUME_CHUNKS_COLLECTION)
     query_filter = None
     if username:
         query_filter = Filter(must=[FieldCondition(key="username", match=MatchValue(value=username))])
@@ -259,6 +289,7 @@ def search_similar_resumes(
     from qdrant_client.models import FieldCondition, Filter, MatchValue
 
     client = _get_client()
+    _ensure_collection(RESUME_COLLECTION)
     query_filter = None
     if industry_type:
         query_filter = Filter(must=[FieldCondition(key="industry_type", match=MatchValue(value=industry_type))])
@@ -329,6 +360,7 @@ def search_similar_jobs(
     from qdrant_client.models import FieldCondition, Filter, MatchValue
 
     client = _get_client()
+    _ensure_collection(JOB_POSTINGS_COLLECTION)
     must_conditions = []
     if status:
         must_conditions.append(FieldCondition(key="status", match=MatchValue(value=status)))

@@ -36,3 +36,8 @@ async def first():
 async def upload_form():
     return FileResponse(Path(__file__).parent / "static" / "upload.html")
 
+
+@app.get("/chatbot")
+async def chatbot_ui():
+    return FileResponse(Path(__file__).parent / "static" / "chat_ui.html")
+
