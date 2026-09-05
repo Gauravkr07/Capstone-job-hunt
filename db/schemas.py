@@ -121,6 +121,8 @@ class JobRecommendationsResponse(BaseModel):
 class UserCreate(BaseModel):
     username: str
     password: str
+    full_name: Optional[str] = None
+    email: Optional[str] = None
     age: int
     graduated: bool
     linkedin_url: Optional[HttpUrl] = None
@@ -130,6 +132,8 @@ class UserCreate(BaseModel):
 
 class UserResponse(BaseModel):
     username: str
+    full_name: Optional[str] = None
+    email: Optional[str] = None
     age: int
     graduated: bool
     linkedin_url: Optional[HttpUrl] = None

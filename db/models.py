@@ -10,6 +10,8 @@ class User(Base):
 
     username = Column(String(150), nullable=False, primary_key=True, unique=True, index=True)
     password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(255), nullable=True)
+    email = Column(String(255), nullable=True, index=True)
     age = Column(Integer, nullable=False)
     graduated = Column(Boolean, nullable=False, default=False)
     linkedin_url = Column(String(255), nullable=True)
