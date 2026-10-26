@@ -63,6 +63,37 @@
     .suggestion{background:var(--panel); border:1px solid var(--line); color:var(--text-dim); padding:10px 14px; border-radius:8px; cursor:pointer; text-align:left;}
     #empty-state{margin:auto; text-align:center; color:var(--text-dim); max-width:420px; padding:0 20px;}
     #empty-state h2{color:var(--text); font-size:22px; margin-bottom:8px;}
+    .bubble{overflow-wrap:anywhere;}
+    .bubble a{color:inherit;}
+    #topbar-left{display:flex; align-items:center; gap:10px; min-width:0;}
+    #topbar h1{white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+    #menu-btn, #drawer-backdrop{display:none;}
+
+    /* ---------- phones & small tablets: sidebar becomes a slide-out drawer ---------- */
+    @media (max-width: 768px){
+      html, body{height:100%; height:100dvh;}
+      #sidebar{position:fixed; inset:0 auto 0 0; width:min(82vw, 300px); z-index:20; transform:translateX(-100%); transition:transform .22s ease; padding-top:calc(20px + env(safe-area-inset-top)); padding-bottom:calc(14px + env(safe-area-inset-bottom));}
+      body.drawer-open #sidebar{transform:none; box-shadow:0 0 40px rgba(0,0,0,.5);}
+      #drawer-backdrop{position:fixed; inset:0; background:rgba(10,11,14,.55); z-index:15;}
+      body.drawer-open #drawer-backdrop{display:block;}
+      #menu-btn{display:flex; align-items:center; justify-content:center; flex:none; width:40px; height:40px; margin-left:-8px; background:none; border:none; color:var(--text); border-radius:8px; cursor:pointer;}
+      #topbar{height:auto; min-height:52px; padding:calc(6px + env(safe-area-inset-top)) 12px 6px;}
+      #topbar h1{font-size:15px; color:var(--text);}
+      #status-pill{font-size:10px; padding:3px 8px; flex:none;}
+      #thread{padding:16px 0 8px; gap:14px;}
+      .row{padding:0 12px;}
+      .bubble{max-width:85%; font-size:15px; padding:10px 14px;}
+      .row.assistant{flex-direction:column; align-items:flex-start; gap:4px;} /* sources line stacks under the answer */
+      #composer{padding:8px 10px calc(10px + env(safe-area-inset-bottom));}
+      #composer-inner{padding:6px 6px 6px 14px;}
+      #msg-input{font-size:16px;} /* >=16px stops iOS zooming in on focus */
+      #send-btn{width:40px; height:40px;}
+      #composer-hint{display:none;}
+      #empty-state{padding:0 16px;}
+      #empty-state h2{font-size:20px;}
+      .suggestion{min-height:44px; font-size:14px;}
+      #settings-modal{width:calc(100vw - 32px); max-width:380px;}
+    }
   </style>
 </head>
 <body>
@@ -76,7 +107,12 @@
 
   <div id="main">
     <div id="topbar">
-      <h1 id="convo-title">New conversation</h1>
+      <div id="topbar-left">
+        <button id="menu-btn" type="button" aria-label="Open conversations" aria-controls="sidebar" aria-expanded="false">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        </button>
+        <h1 id="convo-title">New conversation</h1>
+      </div>
       <span id="status-pill">not connected</span>
     </div>
 
@@ -96,11 +132,13 @@
     <div id="composer">
       <div id="composer-inner">
         <textarea id="msg-input" rows="1" placeholder="Ask me about my experience, skills or projects…"></textarea>
-        <button id="send-btn" title="Send">➤</button>
+        <button id="send-btn" title="Send" aria-label="Send">➤</button>
       </div>
       <div id="composer-hint">Enter to send · Shift+Enter for a new line</div>
     </div>
   </div>
+
+  <div id="drawer-backdrop"></div>
 
   <div id="overlay">
     <div id="settings-modal">
@@ -124,6 +162,17 @@
     (() => {
       const thread = document.getElementById('thread');
       const input = document.getElementById('msg-input');
+      // Each browser gets its own anonymous id so visitors never see each other's
+      // conversations (a shared default would list every recruiter's chats).
+      function visitorId(){
+        let id = null;
+        try { id = localStorage.getItem('jobhunt_username'); } catch (_) {}
+        if (!id || id === 'demo-user') {
+          id = 'visitor-' + (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)).slice(0, 12);
+          try { localStorage.setItem('jobhunt_username', id); } catch (_) {}
+        }
+        return id;
+      }
       const sendBtn = document.getElementById('send-btn');
       const statusPill = document.getElementById('status-pill');
       const convoList = document.getElementById('convo-list');
@@ -136,7 +185,7 @@
         // served by the same FastAPI app, so this works unchanged whether
         // it's opened via localhost or a deployed URL (e.g. Render).
         apiBase: localStorage.getItem('jobhunt_api_base') || window.location.origin,
-        username: localStorage.getItem('jobhunt_username') || 'demo-user',
+        username: visitorId(),
         conversationId: null,
       };
 
@@ -290,7 +339,7 @@
       document.getElementById('settings-cancel').onclick = () => overlay.classList.remove('open');
       document.getElementById('settings-save').onclick = () => {
         state.apiBase = apiBaseInput.value.trim().replace(/\/$/, '');
-        state.username = (jwtInput.value || 'demo-user').trim() || 'demo-user';
+        state.username = (jwtInput.value || '').trim() || visitorId();
         localStorage.setItem('jobhunt_api_base', state.apiBase);
         localStorage.setItem('jobhunt_username', state.username);
         overlay.classList.remove('open');
@@ -390,6 +439,26 @@
           sendBtn.disabled = false;
         }
       }
+
+      // Mobile drawer: the sidebar slides in over the chat on narrow screens.
+      const sidebar = document.getElementById('sidebar');
+      const menuBtn = document.getElementById('menu-btn');
+      function setDrawer(open){
+        document.body.classList.toggle('drawer-open', open);
+        menuBtn.setAttribute('aria-expanded', String(open));
+      }
+      menuBtn.onclick = () => setDrawer(!document.body.classList.contains('drawer-open'));
+      document.getElementById('drawer-backdrop').onclick = () => setDrawer(false);
+      sidebar.addEventListener('click', (e) => {
+        if (e.target.closest('.convo-item, #new-chat, #settings-btn')) setDrawer(false);
+      });
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setDrawer(false); });
+      // The full placeholder wraps onto a clipped second line at phone width.
+      const narrow = window.matchMedia('(max-width: 768px)');
+      const fullPlaceholder = input.placeholder;
+      const syncPlaceholder = () => { input.placeholder = narrow.matches ? 'Ask me anything about my work…' : fullPlaceholder; };
+      narrow.addEventListener('change', syncPlaceholder);
+      syncPlaceholder();
 
       sendBtn.onclick = sendMessage;
       input.addEventListener('keydown', (event) => {
