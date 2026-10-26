@@ -8,7 +8,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-SECRET_KEY = "your-secret-key"
+from config import JWT_SECRET_KEY as SECRET_KEY
 ALGORITHM = "HS256"
 
 PUBLIC_PATHS = {
@@ -19,10 +19,12 @@ PUBLIC_PATHS = {
     "/login",
     "/register",
     "/upload",
-    "/chatbot",
+    "/health",
+    "/favicon.ico",
 }
 
 PUBLIC_PREFIXES = (
+    "/static/",
     "/chatbot",
     "/chat",
 )
@@ -95,16 +97,13 @@ def decode(token: str, key: str, algorithms=None):
     return payload
 
 
-
 class AuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
 
         # Skip authentication for public routes and public route prefixes
-        if request.url.path in PUBLIC_PATHS:
-            return await call_next(request)
-
-        if any(request.url.path.startswith(prefix) for prefix in PUBLIC_PREFIXES):
+        path = request.url.path
+        if path in PUBLIC_PATHS or path.startswith(PUBLIC_PREFIXES):
             return await call_next(request)
 
         authorization = request.headers.get("Authorization")
@@ -121,7 +120,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 content={"message": "Invalid authorization header"}
             )
 
-        token = authorization.split(" ")[1]
+        token = authorization[len("Bearer "):].strip()
 
         try:
             payload = decode(
@@ -135,10 +134,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 content={"message": "Invalid or expired token"}
             )
 
-
         # Store user information for later use
         request.state.user = payload
-
-        response = await call_next(request)
-
-        return response
+        return await call_next(request)

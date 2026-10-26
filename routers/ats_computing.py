@@ -1,12 +1,16 @@
+from dataclasses import asdict
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.connection import get_session
+from db.models import Job
 from db.schemas import AtsCheckRequest, AtsCheckResponse, ExplainMatchRequest, ExplainMatchResponse, JobRecommendationsResponse
 from helpers.auth_context import require_username
 from services.ats_service import compute_ats_match, explain_match, get_job_recommendations
-from services.job_service import build_job_response, get_job_by_id
+from services.job_service import build_job_responses
 
 router = APIRouter(prefix="/jobs", tags=["ats"])
 
@@ -51,19 +55,7 @@ async def check_ats_match(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    return {
-        "job_id": result.job_id,
-        "vector_score": result.vector_score,
-        "skill_score": result.skill_score,
-        "fused_score": result.fused_score,
-        "has_skill_data": result.has_skill_data,
-        "matched_required_skills": result.matched_required_skills,
-        "missing_required_skills": result.missing_required_skills,
-        "matched_preferred_skills": result.matched_preferred_skills,
-        "missing_preferred_skills": result.missing_preferred_skills,
-        "explanation": result.explanation,
-        "retrieved_chunks": result.retrieved_chunks,
-    }
+    return asdict(result)
 
 
 @router.get("/recommendations", response_model=JobRecommendationsResponse, dependencies=[Depends(security)])
@@ -93,26 +85,15 @@ async def get_recommendations(
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    recommendations = []
-    for result in results:
-        job = await get_job_by_id(session, result.job_id)
-        if not job:
-            continue
+    # One query for all recommended jobs + one batched serialization, not 3 queries per job.
+    jobs = (await session.execute(select(Job).where(Job.id.in_([r.job_id for r in results])))).scalars().all()
+    job_responses = {job["id"]: job for job in await build_job_responses(session, list(jobs))}
 
-        job_response = await build_job_response(session, job)
-        recommendations.append(
-            {
-                "job": job_response,
-                "vector_score": result.vector_score,
-                "skill_score": result.skill_score,
-                "fused_score": result.fused_score,
-                "has_skill_data": result.has_skill_data,
-                "matched_required_skills": result.matched_required_skills,
-                "missing_required_skills": result.missing_required_skills,
-                "matched_preferred_skills": result.matched_preferred_skills,
-                "missing_preferred_skills": result.missing_preferred_skills,
-            }
-        )
+    recommendations = [
+        {"job": job_responses[result.job_id], **asdict(result)}
+        for result in results
+        if result.job_id in job_responses
+    ]
 
     return {"recommendations": recommendations}
 

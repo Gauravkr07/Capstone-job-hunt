@@ -112,4 +112,28 @@ class JobSkill(Base):
     __table_args__ = (UniqueConstraint("job_id", "skill_id", name="uq_job_skill"),)
 
 
+class ChatMessage(Base):
+    """Every chatbot turn, so the candidate can review who talked to their assistant."""
 
+    __tablename__ = "chat_messages"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conversation_id = Column(String(64), nullable=False, index=True)
+    visitor = Column(String(150), nullable=False)
+    role = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)
+
+
+class ChatLead(Base):
+    """Contact details a visitor (e.g. a recruiter) left in the chat."""
+
+    __tablename__ = "chat_leads"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    conversation_id = Column(String(64), nullable=False, index=True)
+    visitor = Column(String(150), nullable=False)
+    email = Column(String(255), nullable=True)
+    phone = Column(String(50), nullable=True)
+    message = Column(Text, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow, index=True)

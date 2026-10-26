@@ -18,6 +18,7 @@ and scores/ranks job matches against a candidate's resume.
 | Embeddings | **sentence-transformers** (`all-MiniLM-L6-v2`, local, free, 384-dim) | Turns resume/job summaries and text chunks into vectors, all in one shared space so resumes and JDs are directly comparable. |
 | Structured JD extraction | **Groq API** (optional, hosted LLM) | Extracts title/company/location/skills/experience from raw, unstructured job postings. Falls back to regex/keyword heuristics automatically if no key is configured or the call fails. |
 | RAG match explanation | **Groq API** + Qdrant retrieval | Retrieves the resume chunks most relevant to a job, then generates a grounded natural-language explanation of the match using only that retrieved text — see `POST /jobs/atsCheck` (`include_explanation`) and `POST /jobs/explainMatch`. |
+| Chatbot orchestration | **LangGraph** | `helpers/chatbot_rag.py`: a `StateGraph` (embed query → parallel resume/job retrieval → streamed generation) with checkpointer-backed conversation memory. Served by `POST /chat/stream`. |
 | File parsing | **pypdf**, **python-docx** | Extracts text from uploaded PDF/DOCX resumes. |
 | Auth | Custom JWT (HMAC-SHA256, no external auth library) | `middleware/auth.py` — stateless bearer-token auth. |
 | Containerization | **Docker Compose** | Runs `postgres`, `qdrant`, and `fastapi` together. |
@@ -36,10 +37,12 @@ and scores/ranks job matches against a candidate's resume.
 Create `dev.env` in the project root (gitignored, never committed):
 
 ```
-OPENAI_API_KEY=
+JWT_SECRET_KEY=change-me-to-a-long-random-string
 
 GROQ_API_KEY=
 GROQ_MODEL=openai/gpt-oss-120b
+GROQ_FALLBACK_MODEL=openai/gpt-oss-20b
+LEAD_WEBHOOK_URL=
 
 POSTGRES_USER=postgres
 POSTGRES_PASSWORD=root
@@ -78,7 +81,12 @@ This builds and starts three containers:
 
 ### Verify it's running
 
-- `GET http://localhost:8000/` — basic liveness check.
+- `http://localhost:8000/` — the web app's front door: a React sign-in /
+  create-account page (`static/index.html` + `static/app.js`, no build step;
+  React 18 and `htm` are vendored in `static/vendor/`, so no CDN is needed). Routes are hash-based (`#/login`,
+  `#/register`, `#/home`) so they never clash with the `POST /login` and
+  `POST /register` API routes. The JWT is kept in `localStorage`.
+- `GET http://localhost:8000/health` — liveness check (`{"status": "ok"}`).
 - `http://localhost:8000/docs` — interactive Swagger UI, lists every endpoint
   with a "Try it out" form (handles JSON encoding for you — no manual escaping
   needed, unlike hand-built `curl` commands).
@@ -96,8 +104,8 @@ docker compose up -d --build   # rebuild after a code change and restart
 
 ## 3. Authentication
 
-Every endpoint except `/`, `/upload`, `/register`, `/login`, and the docs
-routes requires a **Bearer JWT** in the `Authorization` header.
+Every endpoint except `/`, `/health`, `/static/*`, `/upload`, `/register`,
+`/login`, the chatbot routes, and the docs routes requires a **Bearer JWT** in the `Authorization` header.
 
 ### `POST /register`
 
@@ -271,6 +279,13 @@ Same dedup/persist/embed pipeline as `/exportJobDesc` from that point on.
 | `is_duplicate` | boolean |
 | `created_at` | datetime |
 
+### `POST /jobs/fetchFromBoards`
+
+Pulls live postings from public Greenhouse/Ashby/Lever boards
+(`helpers/job_board_fetch.py`), prefilters by title/location/age, and ingests
+the survivors. Query: `limit` (1–200, default 25). Returns
+`{fetched_and_filtered, ingested, duplicates, failed}`.
+
 ### `GET /jobs`
 
 List job postings from Postgres, newest first. **Public — no auth required.**
@@ -395,6 +410,31 @@ regardless of pool size.
 
 ---
 
+## 6b. Candidate Chatbot (`/chatbot`)
+
+A public "talk to my CV" page for recruiters. It answers in the first person
+as the candidate (`CHATBOT_LOCKED_USERNAME` in `routers/chatbot_flow.py`),
+only what was asked, and declines off-topic requests. Built as a LangGraph
+graph in `helpers/chatbot_rag.py`:
+
+- **Small talk** ("hi", "thanks", "bye") gets a short reply with no retrieval.
+- **Questions**: CV sections from Qdrant first; if Qdrant is unreachable, the
+  embedding model isn't loaded, or nothing relevant comes back, the same
+  sections are read from Postgres. Groq writes the answer (falling back to
+  `GROQ_FALLBACK_MODEL` on rate limits, then to rule-based answers).
+- **Recruiter contact**: an email or phone number in a message is saved to
+  `chat_leads`; set `LEAD_WEBHOOK_URL` (Slack/Discord webhook) to be pinged.
+- Every turn is logged to `chat_messages`. Read leads and conversations with
+  `GET /owner/chat-inbox` (candidate's JWT only).
+
+**Rebuilding Qdrant from Postgres** (e.g. after switching to a new cluster):
+
+```bash
+docker compose exec fastapi python -m services.reindex
+```
+
+---
+
 ## 7. Data Model Summary
 
 ```
@@ -420,13 +460,12 @@ companies ──< jobs ──< job_skills >── skills
   CUDA-enabled `torch` build via `sentence-transformers`, downloading unused
   GPU/nvidia-* packages. Switching to the CPU-only wheel would shrink the
   image and speed up cold builds.
-- **`AuthMiddleware` `SECRET_KEY`** (`middleware/auth.py`) is a hardcoded
-  placeholder string — move to `dev.env` before any production use.
+- **`JWT_SECRET_KEY`** now comes from `dev.env`, but falls back to an insecure
+  placeholder if unset — always set it in production.
+- **Chat memory is in-process** (LangGraph `InMemorySaver`): lost on restart and
+  not shared across replicas. Swap in a Postgres checkpointer to persist it.
 - **Skill/industry keyword taxonomy** (`helpers/constant.py`) is manually
   curated and English-only.
-- **`GET /health`** is referenced in `middleware/auth.py`'s public-paths
-  allowlist but no longer defined in `main.py` — use `GET /` for liveness
-  instead.
 - **`GET /jobs` has no auth dependency** — confirm this is intentional
   before relying on it as access-controlled.
 - **Hybrid search (BM25 + vector) and reranking beyond the current

@@ -9,15 +9,12 @@ This is the "generation" half that's otherwise missing from this project's
 retrieval-only matching (ATS check / recommendations score and rank, but
 never generate an explanation of *why*).
 """
-import json
 from typing import Any
 
-from config import GROQ_API_KEY, GROQ_MODEL
+from helpers import groq_client
 from helpers.logger import get_logger
 
 logger = get_logger("llm_match_explainer")
-
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 _SYSTEM_PROMPT = """You are an expert technical recruiter and ATS (Applicant Tracking System) \
 analyst: a careful, evidence-based evaluator who explains why a candidate's resume matches a \
@@ -65,41 +62,19 @@ async def explain_match_via_llm(
     chunks. Returns None (never raises) when no API key is configured, there
     are no chunks to ground the explanation in, or the call fails.
     """
-    if not GROQ_API_KEY:
-        logger.info("GROQ_API_KEY not configured; skipping match explanation")
-        return None
-
     if not chunks:
         logger.info("No resume chunks retrieved; skipping match explanation")
         return None
 
-    import httpx
-
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
+    parsed = await groq_client.chat_json(
+        [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": _build_user_prompt(job_title, company_name, required_skills, preferred_skills, chunks)},
         ],
-        "temperature": 0.2,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(GROQ_API_URL, json=payload, headers=headers)
-            response.raise_for_status()
-    except Exception as exc:
-        logger.warning("Groq match-explanation request failed: %s", exc)
-        return None
-
-    try:
-        body = response.json()
-        content = body["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-    except Exception as exc:
-        logger.warning("Groq match-explanation returned unparseable content: %s", exc)
+        temperature=0.2,
+        label="match explanation",
+    )
+    if parsed is None:
         return None
 
     return {

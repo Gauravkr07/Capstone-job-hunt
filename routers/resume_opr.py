@@ -1,8 +1,12 @@
+import asyncio
+
+import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.security import HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.connection import get_session
+from db.models import UserDetails
 from db.schemas import ResumeFetchRequest, ResumeFetchResponse
 from db.vector_store import get_resume_chunk_points, get_resume_vector_point
 from helpers.auth_context import require_username
@@ -12,6 +16,16 @@ from services.resume_service import get_resume_profile, save_resume_profile
 router = APIRouter(prefix="/jobs", tags=["resume"])
 
 security = HTTPBearer()
+
+
+def _profile_response(user_details: UserDetails) -> dict:
+    return {
+        "username": user_details.username,
+        "skills": user_details.skills or [],
+        "experience": user_details.experience,
+        "industry_type": user_details.industry_type,
+        "vector": user_details.vector or [],
+    }
 
 
 @router.get("/resume/me", response_model=ResumeFetchResponse, dependencies=[Depends(security)])
@@ -28,13 +42,7 @@ async def get_my_resume_profile(request: Request, session: AsyncSession = Depend
     if not user_details:
         raise HTTPException(status_code=404, detail="No resume profile found for this user")
 
-    return {
-        "username": user_details.username,
-        "skills": user_details.skills or [],
-        "experience": user_details.experience,
-        "industry_type": user_details.industry_type,
-        "vector": user_details.vector or [],
-    }
+    return _profile_response(user_details)
 
 
 @router.get("/resume/me/qdrant", dependencies=[Depends(security)])
@@ -46,8 +54,10 @@ async def get_my_resume_qdrant_points(request: Request):
     """
     username = require_username(request)
 
-    profile_point = get_resume_vector_point(username)
-    chunk_points = get_resume_chunk_points(username)
+    profile_point, chunk_points = await asyncio.gather(
+        asyncio.to_thread(get_resume_vector_point, username),
+        asyncio.to_thread(get_resume_chunk_points, username),
+    )
 
     return {
         "username": username,
@@ -80,29 +90,21 @@ async def fetch_resume_profile(
     try:
         resume_text = payload.resume_text
         if not resume_text and payload.resume_url:
-            import urllib.request
-
-            with urllib.request.urlopen(payload.resume_url, timeout=10) as response:
-                content = response.read()
-                content_type = response.headers.get("Content-Type")
-                resume_text = extract_resume_text(content, filename=payload.resume_url, content_type=content_type)
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                response = await client.get(payload.resume_url)
+                response.raise_for_status()
+            resume_text = extract_resume_text(
+                response.content, filename=payload.resume_url, content_type=response.headers.get("Content-Type")
+            )
 
         if not resume_text or not resume_text.strip():
             raise ValueError("A resume body or resume_url is required")
-    except HTTPException:
-        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     user_details = await save_resume_profile(username, resume_text, session)
 
-    return {
-        "username": user_details.username,
-        "skills": user_details.skills or [],
-        "experience": user_details.experience,
-        "industry_type": user_details.industry_type,
-        "vector": user_details.vector or [],
-    }
+    return _profile_response(user_details)
 
 
 @router.post("/resume/upload", response_model=ResumeFetchResponse, dependencies=[Depends(security)])
@@ -136,10 +138,4 @@ async def upload_resume_file(
 
     user_details = await save_resume_profile(username, resume_text, session)
 
-    return {
-        "username": user_details.username,
-        "skills": user_details.skills or [],
-        "experience": user_details.experience,
-        "industry_type": user_details.industry_type,
-        "vector": user_details.vector or [],
-    }
+    return _profile_response(user_details)

@@ -1,12 +1,6 @@
-import json
 from typing import Any
 
-from config import GROQ_API_KEY, GROQ_MODEL
-from helpers.logger import get_logger
-
-logger = get_logger("llm_jd_extractor")
-
-GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+from helpers import groq_client
 
 _SYSTEM_PROMPT = """You are an expert job-description parser: a precise information-extraction \
 assistant specialized in reading raw, unstructured job postings (any format, any source) and \
@@ -46,40 +40,26 @@ async def extract_job_fields_via_llm(raw_text: str) -> dict[str, Any] | None:
     Returns None (never raises) when no API key is configured or the call fails,
     so callers can fall back to the regex-based parser.
     """
-    if not GROQ_API_KEY:
-        logger.info("GROQ_API_KEY not configured; skipping LLM extraction")
-        return None
-
-    import httpx
-
-    payload = {
-        "model": GROQ_MODEL,
-        "messages": [
+    parsed = await groq_client.chat_json(
+        [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": _build_user_prompt(raw_text)},
         ],
-        "temperature": 0,
-        "response_format": {"type": "json_object"},
-    }
-    headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.post(GROQ_API_URL, json=payload, headers=headers)
-            response.raise_for_status()
-    except Exception as exc:
-        logger.warning("Groq LLM extraction request failed: %s", exc)
-        return None
-
-    try:
-        body = response.json()
-        content = body["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-    except Exception as exc:
-        logger.warning("Groq LLM extraction returned unparseable content: %s", exc)
+        temperature=0,
+        label="JD extraction",
+    )
+    if parsed is None:
         return None
 
     return _normalize_llm_result(parsed)
+
+
+def _to_int(value: Any) -> int | None:
+    # LLMs occasionally return "3" or 3.0 for integer fields; the DB columns are Integer.
+    try:
+        return int(float(value)) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def _normalize_llm_result(parsed: dict[str, Any]) -> dict[str, Any]:
@@ -103,8 +83,8 @@ def _normalize_llm_result(parsed: dict[str, Any]) -> dict[str, Any]:
         "location": location,
         "remote_type": parsed.get("remote_type") or None,
         "employment_type": parsed.get("employment_type") or None,
-        "experience_min": parsed.get("experience_min"),
-        "experience_max": parsed.get("experience_max"),
+        "experience_min": _to_int(parsed.get("experience_min")),
+        "experience_max": _to_int(parsed.get("experience_max")),
         "required_skills": required_skills,
         "preferred_skills": preferred_skills,
         "industry_type": (parsed.get("industry_type") or "").strip().lower() or None,

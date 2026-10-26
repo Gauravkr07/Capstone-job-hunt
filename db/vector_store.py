@@ -1,4 +1,5 @@
 import time
+import uuid
 from functools import lru_cache
 from typing import Any
 
@@ -17,7 +18,8 @@ JOB_POSTINGS_COLLECTION = "job_postings"
 def _get_client():
     from qdrant_client import QdrantClient
 
-    return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
+    # Short timeout: callers (e.g. the chatbot) fall back to Postgres rather than hang.
+    return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY, timeout=10)
 
 
 _PAYLOAD_INDEXES = {
@@ -48,7 +50,16 @@ def _ensure_payload_indexes(collection_name: str) -> None:
             logger.debug("Payload index for %s.%s already exists or failed: %s", collection_name, field_name, exc)
 
 
+# Collections already verified/created in this process. Checking existence +
+# creating payload indexes costs 2-4 network round-trips, so do it once per
+# collection rather than on every read/write.
+_ensured_collections: set[str] = set()
+
+
 def _ensure_collection(collection_name: str) -> None:
+    if collection_name in _ensured_collections:
+        return
+
     from qdrant_client.models import Distance, VectorParams
 
     client = _get_client()
@@ -58,29 +69,26 @@ def _ensure_collection(collection_name: str) -> None:
             vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
         )
     _ensure_payload_indexes(collection_name)
-
-
-def ensure_collection() -> None:
-    _ensure_collection(RESUME_COLLECTION)
+    _ensured_collections.add(collection_name)
 
 
 def _point_id(username: str) -> str:
-    import uuid
-
     # Deterministic UUID from username so re-upserts overwrite the same point.
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"resume-profile:{username}"))
 
 
 def _chunk_point_id(username: str, section: str, chunk_index: int) -> str:
-    import uuid
-
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"resume-chunk:{username}:{section}:{chunk_index}"))
 
 
 def _job_point_id(job_id: int) -> str:
-    import uuid
-
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, f"job-posting:{job_id}"))
+
+
+def _username_filter(username: str):
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    return Filter(must=[FieldCondition(key="username", match=MatchValue(value=username))])
 
 
 def get_resume_vector_point(username: str) -> dict[str, Any] | None:
@@ -98,14 +106,12 @@ def get_resume_vector_point(username: str) -> dict[str, Any] | None:
 
 def get_resume_chunk_points(username: str) -> list[dict[str, Any]]:
     """Direct lookup (not similarity search) -- returns all stored chunk points + vectors for one user."""
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
-
     client = _get_client()
     _ensure_collection(RESUME_CHUNKS_COLLECTION)
 
     points, _ = client.scroll(
         collection_name=RESUME_CHUNKS_COLLECTION,
-        scroll_filter=Filter(must=[FieldCondition(key="username", match=MatchValue(value=username))]),
+        scroll_filter=_username_filter(username),
         with_vectors=True,
         limit=100,
     )
@@ -157,7 +163,7 @@ def upsert_resume_vector(
     from qdrant_client.models import PointStruct
 
     client = _get_client()
-    ensure_collection()
+    _ensure_collection(RESUME_COLLECTION)
 
     start = time.perf_counter()
     client.upsert(
@@ -179,15 +185,29 @@ def upsert_resume_vector(
     logger.info("Upserted vector for %s into %s in %.1fms", username, RESUME_COLLECTION, duration_ms)
 
 
-def delete_resume_chunks(username: str) -> None:
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
+def delete_resume_vector(username: str) -> None:
+    from qdrant_client.models import PointIdsList
 
+    client = _get_client()
+    _ensure_collection(RESUME_COLLECTION)
+
+    client.delete(collection_name=RESUME_COLLECTION, points_selector=PointIdsList(points=[_point_id(username)]))
+    logger.info("Deleted existing profile point for %s from %s", username, RESUME_COLLECTION)
+
+
+def delete_resume_data(username: str) -> None:
+    """Remove everything Qdrant holds for this user's resume: the profile point and all section chunks."""
+    delete_resume_vector(username)
+    delete_resume_chunks(username)
+
+
+def delete_resume_chunks(username: str) -> None:
     client = _get_client()
     _ensure_collection(RESUME_CHUNKS_COLLECTION)
 
     client.delete(
         collection_name=RESUME_CHUNKS_COLLECTION,
-        points_selector=Filter(must=[FieldCondition(key="username", match=MatchValue(value=username))]),
+        points_selector=_username_filter(username),
     )
     logger.info("Deleted existing chunks for %s from %s", username, RESUME_CHUNKS_COLLECTION)
 
@@ -199,8 +219,8 @@ def upsert_resume_chunks(
     """
     chunks: list of {"section": str, "chunk_index": int, "text": str, "vector": list[float]}
 
-    Replaces all of the user's existing chunks with the given set, since section
-    boundaries/count can change between resume versions.
+    Callers replacing a resume must call delete_resume_data() first -- section
+    boundaries/count change between resume versions, so stale chunks must go.
     """
     if not chunks:
         logger.warning("Skipping Qdrant chunk upsert for %s: no chunks", username)
@@ -210,8 +230,6 @@ def upsert_resume_chunks(
 
     client = _get_client()
     _ensure_collection(RESUME_CHUNKS_COLLECTION)
-
-    delete_resume_chunks(username)
 
     start = time.perf_counter()
     client.upsert(
@@ -250,13 +268,9 @@ def search_resume_chunks(
         logger.warning("Skipping Qdrant chunk search: empty query vector")
         return []
 
-    from qdrant_client.models import FieldCondition, Filter, MatchValue
-
     client = _get_client()
     _ensure_collection(RESUME_CHUNKS_COLLECTION)
-    query_filter = None
-    if username:
-        query_filter = Filter(must=[FieldCondition(key="username", match=MatchValue(value=username))])
+    query_filter = _username_filter(username) if username else None
 
     start = time.perf_counter()
     results = client.query_points(

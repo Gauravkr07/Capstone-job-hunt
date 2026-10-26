@@ -17,13 +17,13 @@ than preferred, and skill-overlap higher than raw vector similarity, since a
 resume that's semantically "similar" but missing hard requirements should not
 outrank one that actually has them.
 """
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import Job, JobSkill, Skill
+from db.models import Job
 from db.vector_store import (
     get_job_vector_point,
     get_job_vector_points,
@@ -32,6 +32,7 @@ from db.vector_store import (
     search_similar_jobs,
 )
 from helpers.llm_match_explainer import explain_match_via_llm
+from services.job_service import fetch_job_skills
 
 # How many resume chunks to retrieve as grounding context for a match
 # explanation -- enough for a well-rounded answer without bloating the LLM prompt.
@@ -107,50 +108,14 @@ def _skill_overlap_score(
     return score, matched_required, missing_required, matched_preferred, missing_preferred
 
 
-async def _fetch_job_required_preferred_skills(session: AsyncSession, job_id: int) -> tuple[list[str], list[str]]:
-    skill_rows = await session.execute(select(JobSkill, Skill).join(Skill).where(JobSkill.job_id == job_id))
-    required_skills: list[str] = []
-    preferred_skills: list[str] = []
-    for job_skill, skill in skill_rows.all():
-        if job_skill.importance == "preferred":
-            preferred_skills.append(skill.name)
-        else:
-            required_skills.append(skill.name)
-    return required_skills, preferred_skills
-
-
-async def _fetch_job_skills_batch(
-    session: AsyncSession, job_ids: list[int]
-) -> dict[int, tuple[list[str], list[str]]]:
-    """
-    Batched version of _fetch_job_required_preferred_skills -- one Postgres
-    round-trip for many jobs instead of one per job. Returns
-    {job_id: (required_skills, preferred_skills)}.
-    """
-    if not job_ids:
-        return {}
-
-    rows = await session.execute(
-        select(JobSkill.job_id, JobSkill.importance, Skill.name)
-        .join(Skill)
-        .where(JobSkill.job_id.in_(job_ids))
-    )
-
-    result: dict[int, tuple[list[str], list[str]]] = {job_id: ([], []) for job_id in job_ids}
-    for job_id, importance, skill_name in rows.all():
-        required, preferred = result[job_id]
-        (preferred if importance == "preferred" else required).append(skill_name)
-
-    return result
-
-
 def _score_match(
+    job_id: int,
     resume_vector: list[float],
     resume_skills: set[str],
     job_vector: list[float],
     required_skills: list[str],
     preferred_skills: list[str],
-) -> tuple[float, float, float, bool, list[str], list[str], list[str], list[str]]:
+) -> AtsMatchResult:
     """Shared scoring core used by both the single-job ATS check and multi-job recommendations."""
     has_skill_data = bool(required_skills or preferred_skills)
 
@@ -166,7 +131,47 @@ def _score_match(
         # rather than diluting the score with a meaningless zero.
         fused_score = vector_score
 
-    return vector_score, skill_score, fused_score, has_skill_data, matched_req, missing_req, matched_pref, missing_pref
+    return AtsMatchResult(
+        job_id=job_id,
+        vector_score=round(vector_score, 4),
+        skill_score=round(skill_score, 4),
+        fused_score=round(fused_score, 4),
+        has_skill_data=has_skill_data,
+        matched_required_skills=matched_req,
+        missing_required_skills=missing_req,
+        matched_preferred_skills=matched_pref,
+        missing_preferred_skills=missing_pref,
+    )
+
+
+async def _require_resume_point(username: str) -> dict[str, Any]:
+    resume_point = await asyncio.to_thread(get_resume_vector_point, username)
+    if not resume_point:
+        raise ValueError(f"No resume vector found for user '{username}' -- submit a resume first")
+    return resume_point
+
+
+async def _load_job_context(
+    session: AsyncSession, username: str, job_id: int
+) -> tuple[Job, dict[str, Any], dict[str, Any], list[str], list[str]]:
+    """
+    Everything a single-job match needs: (job, job_point, resume_point,
+    required_skills, preferred_skills). Raises ValueError if the job, its
+    embedding, or the caller's resume is missing.
+    """
+    job = await session.get(Job, job_id)
+    if not job:
+        raise ValueError(f"Job {job_id} not found")
+
+    required_skills, preferred_skills = (await fetch_job_skills(session, [job_id]))[job_id]
+
+    job_point, resume_point = await asyncio.gather(
+        asyncio.to_thread(get_job_vector_point, job_id), _require_resume_point(username)
+    )
+    if not job_point:
+        raise ValueError(f"No embedding found for job {job_id}")
+
+    return job, job_point, resume_point, required_skills, preferred_skills
 
 
 async def _generate_match_explanation(
@@ -187,7 +192,9 @@ async def _generate_match_explanation(
     no LLM is configured or the call failed -- retrieved_chunks are still
     returned so the caller has the raw evidence either way.
     """
-    chunks = search_resume_chunks(job_point["vector"], limit=EXPLAIN_MATCH_CHUNK_LIMIT, username=username)
+    chunks = await asyncio.to_thread(
+        search_resume_chunks, job_point["vector"], EXPLAIN_MATCH_CHUNK_LIMIT, username
+    )
 
     job_title = job_point["payload"].get("title", job.title)
     company_name = job_point["payload"].get("company", "")
@@ -209,9 +216,8 @@ async def compute_ats_match(
 ) -> AtsMatchResult:
     """
     Compute a hybrid (vector + skill-overlap) ATS match score between a
-    user's resume and one job posting. Raises ValueError if either the
-    resume or job embedding is missing (caller should have already ingested
-    both before checking a match).
+    user's resume and one job posting. Raises ValueError if the job, its
+    embedding, or the resume embedding is missing.
 
     Set include_explanation=True to also run the RAG-based match explanation
     (retrieves resume chunks + calls Groq) and attach it to the result --
@@ -220,46 +226,25 @@ async def compute_ats_match(
     get_job_recommendations) should never set this, to avoid one LLM call
     per candidate.
     """
-    job = await session.get(Job, job_id)
-    if not job:
-        raise ValueError(f"Job {job_id} not found")
-
-    required_skills, preferred_skills = await _fetch_job_required_preferred_skills(session, job_id)
-
-    resume_point = get_resume_vector_point(username)
-    if not resume_point:
-        raise ValueError(f"No resume vector found for user '{username}' -- submit a resume first")
-
-    job_point = get_job_vector_point(job_id)
-    if not job_point:
-        raise ValueError(f"No embedding found for job {job_id}")
-
-    resume_skills = set(resume_point["payload"].get("skills") or [])
-
-    vector_score, skill_score, fused_score, has_skill_data, matched_req, missing_req, matched_pref, missing_pref = (
-        _score_match(resume_point["vector"], resume_skills, job_point["vector"], required_skills, preferred_skills)
+    job, job_point, resume_point, required_skills, preferred_skills = await _load_job_context(
+        session, username, job_id
     )
 
-    explanation = None
-    retrieved_chunks: list[dict[str, Any]] = []
+    result = _score_match(
+        job_id,
+        resume_point["vector"],
+        set(resume_point["payload"].get("skills") or []),
+        job_point["vector"],
+        required_skills,
+        preferred_skills,
+    )
+
     if include_explanation:
-        explanation, retrieved_chunks = await _generate_match_explanation(
+        result.explanation, result.retrieved_chunks = await _generate_match_explanation(
             job, job_point, username, required_skills, preferred_skills
         )
 
-    return AtsMatchResult(
-        job_id=job_id,
-        vector_score=round(vector_score, 4),
-        skill_score=round(skill_score, 4),
-        fused_score=round(fused_score, 4),
-        has_skill_data=has_skill_data,
-        matched_required_skills=matched_req,
-        missing_required_skills=missing_req,
-        matched_preferred_skills=matched_pref,
-        missing_preferred_skills=missing_pref,
-        explanation=explanation,
-        retrieved_chunks=retrieved_chunks,
-    )
+    return result
 
 
 async def explain_match(session: AsyncSession, username: str, job_id: int) -> dict[str, Any]:
@@ -272,24 +257,11 @@ async def explain_match(session: AsyncSession, username: str, job_id: int) -> di
 
     Raises ValueError if the job doesn't exist or the caller has no resume.
     """
-    job = await session.get(Job, job_id)
-    if not job:
-        raise ValueError(f"Job {job_id} not found")
-
-    required_skills, preferred_skills = await _fetch_job_required_preferred_skills(session, job_id)
-
-    job_point = get_job_vector_point(job_id)
-    if not job_point:
-        raise ValueError(f"No embedding found for job {job_id}")
-
-    resume_point = get_resume_vector_point(username)
-    if not resume_point:
-        raise ValueError(f"No resume vector found for user '{username}' -- submit a resume first")
+    job, job_point, _, required_skills, preferred_skills = await _load_job_context(session, username, job_id)
 
     explanation, retrieved_chunks = await _generate_match_explanation(
         job, job_point, username, required_skills, preferred_skills
     )
-
     return {"explanation": explanation, "retrieved_chunks": retrieved_chunks}
 
 
@@ -305,45 +277,23 @@ async def get_job_recommendations(session: AsyncSession, username: str, limit: i
     Returns results sorted by fused_score descending, highest-likelihood
     matches first. Raises ValueError if the caller has no resume yet.
     """
-    resume_point = get_resume_vector_point(username)
-    if not resume_point:
-        raise ValueError(f"No resume vector found for user '{username}' -- submit a resume first")
-
+    resume_point = await _require_resume_point(username)
     resume_skills = set(resume_point["payload"].get("skills") or [])
 
-    candidates = search_similar_jobs(resume_point["vector"], limit=RECOMMENDATION_RETRIEVAL_LIMIT, status="ACTIVE")
+    candidates = await asyncio.to_thread(
+        search_similar_jobs, resume_point["vector"], RECOMMENDATION_RETRIEVAL_LIMIT, "ACTIVE"
+    )
     candidate_job_ids = [candidate["job_id"] for candidate in candidates]
 
     # Batched lookups: one Qdrant retrieve + one Postgres query for the whole
     # candidate pool, instead of two round-trips per candidate.
-    job_vector_points = get_job_vector_points(candidate_job_ids)
-    job_skills_by_id = await _fetch_job_skills_batch(session, candidate_job_ids)
+    job_vector_points = await asyncio.to_thread(get_job_vector_points, candidate_job_ids)
+    job_skills_by_id = await fetch_job_skills(session, candidate_job_ids)
 
-    results: list[AtsMatchResult] = []
-    for job_id in candidate_job_ids:
-        job_point = job_vector_points.get(job_id)
-        if not job_point:
-            continue
-
-        required_skills, preferred_skills = job_skills_by_id.get(job_id, ([], []))
-
-        vector_score, skill_score, fused_score, has_skill_data, matched_req, missing_req, matched_pref, missing_pref = (
-            _score_match(resume_point["vector"], resume_skills, job_point["vector"], required_skills, preferred_skills)
-        )
-
-        results.append(
-            AtsMatchResult(
-                job_id=job_id,
-                vector_score=round(vector_score, 4),
-                skill_score=round(skill_score, 4),
-                fused_score=round(fused_score, 4),
-                has_skill_data=has_skill_data,
-                matched_required_skills=matched_req,
-                missing_required_skills=missing_req,
-                matched_preferred_skills=matched_pref,
-                missing_preferred_skills=missing_pref,
-            )
-        )
-
+    results = [
+        _score_match(job_id, resume_point["vector"], resume_skills, job_vector_points[job_id]["vector"], *job_skills_by_id[job_id])
+        for job_id in candidate_job_ids
+        if job_id in job_vector_points
+    ]
     results.sort(key=lambda r: r.fused_score, reverse=True)
     return results[:limit]

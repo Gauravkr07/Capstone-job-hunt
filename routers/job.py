@@ -1,3 +1,4 @@
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -7,7 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from db.connection import get_session
 from db.schemas import JobCreate, JobListResponse, JobRawTextCreate, JobResponse
 from helpers.jd_scraper import parse_raw_job_posting
-from services.job_service import build_job_response, ingest_job, list_jobs
+from helpers.job_board_fetch import fetch_and_filter
+from helpers.logger import get_logger
+from services.job_service import build_job_response, build_job_responses, ingest_job, list_jobs
+
+logger = get_logger("job_router")
 
 router = APIRouter(prefix="/jobs", tags=["job-posting"])
 
@@ -93,7 +98,55 @@ async def scrape_job_posting(job_data: JobRawTextCreate, session: AsyncSession =
     return await build_job_response(session, job, is_duplicate)
 
 
-@router.get("", response_model=JobListResponse,dependencies=[Depends(security)])
+@router.post("/fetchFromBoards", dependencies=[Depends(security)])
+async def fetch_jobs_from_boards(
+    limit: int = Query(default=25, ge=1, le=200, description="Max postings to ingest this run, as a cost/time guard"),
+    session: AsyncSession = Depends(get_session),
+):
+    """
+    Pull live postings from public ATS boards (Greenhouse/Lever/Ashby -- see
+    helpers.job_board_fetch.DEFAULT_COMPANIES), run them through the same
+    deterministic title/location/freshness prefilter as the standalone
+    job-search agent this was adapted from, then ingest the survivors through
+    the existing extract/dedupe/embed pipeline (same as /exportJobDesc).
+
+    Never raises on a single bad posting or a dead board slug -- both are
+    logged and skipped so one failure can't sink the whole batch.
+    """
+    # Sequential HTTP to ~20 boards takes several seconds -- keep it off the event loop.
+    candidates = (await asyncio.to_thread(fetch_and_filter))[:limit]
+
+    ingested, duplicates, failed = 0, 0, 0
+    for job in candidates:
+        try:
+            _, is_duplicate = await ingest_job(
+                session,
+                title=job.title,
+                company_name=job.company,
+                jd_text=job.description,
+                location=[job.location] if job.location else None,
+                source=job.ats,
+                source_url=job.url,
+                external_job_id=job.job_id,
+            )
+            duplicates += is_duplicate
+            ingested += not is_duplicate
+        except Exception as exc:
+            # A failed flush/commit leaves the session unusable until rolled back,
+            # which would otherwise make every later posting in the batch fail too.
+            await session.rollback()
+            failed += 1
+            logger.warning("Failed to ingest %s (%s): %s", job.job_id, job.title, exc)
+
+    return {
+        "fetched_and_filtered": len(candidates),
+        "ingested": ingested,
+        "duplicates": duplicates,
+        "failed": failed,
+    }
+
+
+@router.get("", response_model=JobListResponse, dependencies=[Depends(security)])
 async def get_jobs(
     status: str | None = Query(default=None, description="Filter by job status, e.g. ACTIVE"),
     industry_type: str | None = Query(default=None, description="Filter by industry, e.g. fintech"),
@@ -106,8 +159,5 @@ async def get_jobs(
     filters and pagination.
     """
     jobs, total = await list_jobs(session, status=status, industry_type=industry_type, limit=limit, offset=offset)
-    job_responses = [await build_job_response(session, job) for job in jobs]
-
-    return {"total": total, "limit": limit, "offset": offset, "jobs": job_responses}
-
+    return {"total": total, "limit": limit, "offset": offset, "jobs": await build_job_responses(session, jobs)}
 

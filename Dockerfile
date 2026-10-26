@@ -11,6 +11,11 @@ RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
     && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
     && pip install --no-cache-dir -r requirements.txt
 
+# Bake the embedding model into the image so containers don't download it on
+# every start (cached as its own layer; only re-fetched when deps change).
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+ENV HF_HUB_OFFLINE=1
+
 COPY . .
 
 EXPOSE 8000

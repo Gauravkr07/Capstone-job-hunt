@@ -1,3 +1,5 @@
+import asyncio
+
 from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,10 +8,6 @@ from db.models import Company, Job, JobSkill, Skill
 from db.vector_store import upsert_job_vector
 from helpers.embeddings import EMBEDDING_MODEL_NAME, embed_text
 from helpers.jd_scraper import scrape_job_description
-
-
-async def get_job_by_id(session: AsyncSession, job_id: int) -> Job | None:
-    return await session.get(Job, job_id)
 
 
 def _apply_job_filters(query, status: str | None, industry_type: str | None):
@@ -50,16 +48,68 @@ async def get_or_create_company(session: AsyncSession, company_name: str) -> Com
     return company
 
 
-async def get_or_create_skill(session: AsyncSession, name: str) -> Skill:
-    existing = await session.execute(select(Skill).where(Skill.name == name))
-    skill = existing.scalars().first()
-    if skill:
-        return skill
+async def get_or_create_skills(session: AsyncSession, names: list[str]) -> dict[str, Skill]:
+    """Resolve many skill names in one SELECT (+ one flush for any new ones), instead of a query per skill."""
+    if not names:
+        return {}
 
-    skill = Skill(name=name)
-    session.add(skill)
-    await session.flush()
-    return skill
+    existing = await session.execute(select(Skill).where(Skill.name.in_(names)))
+    skills = {skill.name: skill for skill in existing.scalars()}
+
+    new_skills = [Skill(name=name) for name in names if name not in skills]
+    if new_skills:
+        session.add_all(new_skills)
+        await session.flush()
+        skills.update({skill.name: skill for skill in new_skills})
+    return skills
+
+
+async def fetch_job_skills(session: AsyncSession, job_ids: list[int]) -> dict[int, tuple[list[str], list[str]]]:
+    """
+    One Postgres round-trip for many jobs' skills. Returns
+    {job_id: (required_skills, preferred_skills)} with an entry for every job_id.
+    """
+    result: dict[int, tuple[list[str], list[str]]] = {job_id: ([], []) for job_id in job_ids}
+    if not job_ids:
+        return result
+
+    rows = await session.execute(
+        select(JobSkill.job_id, JobSkill.importance, Skill.name).join(Skill).where(JobSkill.job_id.in_(job_ids))
+    )
+    for job_id, importance, skill_name in rows.all():
+        required, preferred = result[job_id]
+        (preferred if importance == "preferred" else required).append(skill_name)
+    return result
+
+
+def index_job_vector(job: Job, company_name: str, skills: list[str], cleaned_description: str | None) -> None:
+    """Embed one job and upsert it into Qdrant. Shared by ingestion and the Postgres -> Qdrant reindex."""
+    embedding_text = "\n".join(
+        part
+        for part in [
+            f"Title: {job.title}",
+            f"Company: {company_name}",
+            f"Skills: {', '.join(skills)}" if skills else "",
+            f"Industry: {job.industry_type}" if job.industry_type else "",
+            cleaned_description or "",
+        ]
+        if part
+    )
+    upsert_job_vector(
+        job.id,
+        embed_text(embedding_text),
+        {
+            "title": job.title,
+            "company": company_name,
+            "location": job.location,
+            "remote_type": job.remote_type,
+            "experience_min": job.experience_min,
+            "experience_max": job.experience_max,
+            "skills": skills,
+            "industry_type": job.industry_type,
+            "status": job.status,
+        },
+    )
 
 
 async def ingest_job(
@@ -130,65 +180,32 @@ async def ingest_job(
     session.add(job)
     await session.flush()
 
-    for skill_name in extracted["required_skills"]:
-        skill = await get_or_create_skill(session, skill_name)
-        session.add(JobSkill(job_id=job.id, skill_id=skill.id, importance="required"))
-
-    for skill_name in extracted["preferred_skills"]:
-        skill = await get_or_create_skill(session, skill_name)
-        session.add(JobSkill(job_id=job.id, skill_id=skill.id, importance="preferred"))
+    # Required wins if the extractor listed a skill under both (uq_job_skill allows one row per skill).
+    importance_by_skill = {name[:150]: "preferred" for name in extracted["preferred_skills"] if name}
+    importance_by_skill.update({name[:150]: "required" for name in extracted["required_skills"] if name})
+    skills = await get_or_create_skills(session, list(importance_by_skill))
+    session.add_all(
+        JobSkill(job_id=job.id, skill_id=skills[name].id, importance=importance)
+        for name, importance in importance_by_skill.items()
+    )
 
     await session.commit()
     await session.refresh(job)
 
-    embedding_text = "\n".join(
-        part
-        for part in [
-            f"Title: {title}",
-            f"Company: {company_name}",
-            f"Skills: {', '.join(extracted['skills'])}" if extracted["skills"] else "",
-            f"Industry: {extracted['industry_type']}" if extracted["industry_type"] else "",
-            extracted["cleaned_description"],
-        ]
-        if part
-    )
-    embedding = embed_text(embedding_text)
-
-    upsert_job_vector(
-        job_id=job.id,
-        vector=embedding,
-        payload={
-            "title": title,
-            "company": company_name,
-            "location": location,
-            "remote_type": extracted["remote_type"],
-            "experience_min": extracted["experience_min"],
-            "experience_max": extracted["experience_max"],
-            "skills": extracted["skills"],
-            "industry_type": extracted["industry_type"],
-            "status": job.status,
-        },
+    # Embedding (CPU) and the Qdrant upsert are blocking -- run off the event loop.
+    await asyncio.to_thread(
+        index_job_vector, job, company_name, extracted["skills"], extracted["cleaned_description"]
     )
 
     return job, False
 
 
-async def build_job_response(session: AsyncSession, job: Job, is_duplicate: bool = False) -> dict:
-    skill_rows = await session.execute(select(JobSkill, Skill).join(Skill).where(JobSkill.job_id == job.id))
-    required_skills = []
-    preferred_skills = []
-    for job_skill, skill in skill_rows.all():
-        if job_skill.importance == "preferred":
-            preferred_skills.append(skill.name)
-        else:
-            required_skills.append(skill.name)
-
-    company = await session.get(Company, job.company_id)
-
+def _job_response(job: Job, company_name: str, skills: tuple[list[str], list[str]], is_duplicate: bool) -> dict:
+    required_skills, preferred_skills = skills
     return {
         "id": job.id,
         "title": job.title,
-        "company_name": company.name if company else "",
+        "company_name": company_name,
         "description": job.description,
         "location": job.location,
         "remote_type": job.remote_type,
@@ -202,3 +219,26 @@ async def build_job_response(session: AsyncSession, job: Job, is_duplicate: bool
         "is_duplicate": is_duplicate,
         "created_at": job.created_at,
     }
+
+
+async def build_job_responses(session: AsyncSession, jobs: list[Job]) -> list[dict]:
+    """Serialize many jobs with 2 queries total (skills + company names), not 2 per job."""
+    if not jobs:
+        return []
+
+    skills_by_job = await fetch_job_skills(session, [job.id for job in jobs])
+    company_rows = await session.execute(
+        select(Company.id, Company.name).where(Company.id.in_({job.company_id for job in jobs}))
+    )
+    company_names = dict(company_rows.all())
+
+    return [
+        _job_response(job, company_names.get(job.company_id, ""), skills_by_job[job.id], is_duplicate=False)
+        for job in jobs
+    ]
+
+
+async def build_job_response(session: AsyncSession, job: Job, is_duplicate: bool = False) -> dict:
+    skills = (await fetch_job_skills(session, [job.id]))[job.id]
+    company = await session.get(Company, job.company_id)
+    return _job_response(job, company.name if company else "", skills, is_duplicate)

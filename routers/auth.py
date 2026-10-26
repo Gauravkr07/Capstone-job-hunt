@@ -1,56 +1,25 @@
-from datetime import datetime, timedelta
 import hashlib
+import hmac
 import secrets
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.connection import get_session
-from db.models import User, UserDetails
+from db.models import User
 from db.schemas import LoginResponse, UserCreate
 from middleware.auth import SECRET_KEY, ALGORITHM, encode
 
 router = APIRouter()
 
+JWT_TTL_SECONDS = 3600
+REFRESH_TTL_SECONDS = 30 * 24 * 3600
+
 
 def _hash_password(password: str) -> str:
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
-
-
-def get_authenticated_username(request: Request, fallback: str = "demo-user") -> str:
-    username = request.state.user.get("sub") if hasattr(request.state, "user") else None
-    if username:
-        return username
-
-    username = request.query_params.get("username") if hasattr(request, "query_params") else None
-    if username and username.strip():
-        return username.strip().lower()
-
-    if request.headers.get("x-demo-user"):
-        return request.headers.get("x-demo-user").strip().lower()
-
-    return fallback
-
-
-def serialize_user_details(user: User, user_details: UserDetails | None = None) -> dict:
-    return {
-        "username": user.username,
-        "full_name": user.full_name,
-        "email": user.email,
-        "age": user.age,
-        "graduated": user.graduated,
-        "linkedin_url": str(user.linkedin_url) if user.linkedin_url else None,
-        "leetcode_url": str(user.leetcode_url) if user.leetcode_url else None,
-        "hackerrank_url": str(user.hackerrank_url) if user.hackerrank_url else None,
-        "resume_skills": user_details.skills if user_details and user_details.skills else [],
-        "experience": user_details.experience if user_details else None,
-        "industry_type": user_details.industry_type if user_details else None,
-        "resume_text_available": bool(user_details and user_details.resume_text and user_details.resume_text.strip()),
-        "resume_text": user_details.resume_text if user_details else None,
-    }
 
 
 class LoginRequest(BaseModel):
@@ -62,8 +31,7 @@ class LoginRequest(BaseModel):
 async def register(user_data: UserCreate, session: AsyncSession = Depends(get_session)):
     username = user_data.username.strip().lower()
 
-    existing = await session.execute(select(User).where(User.username == username))
-    if existing.scalars().first():
+    if await session.get(User, username):
         raise HTTPException(status_code=400, detail="User already exists")
 
     linkedin_url = str(user_data.linkedin_url) if user_data.linkedin_url else None
@@ -90,29 +58,24 @@ async def register(user_data: UserCreate, session: AsyncSession = Depends(get_se
 @router.post("/login", response_model=LoginResponse)
 async def login(credentials: LoginRequest, session: AsyncSession = Depends(get_session)):
     username = credentials.username.strip().lower()
-    result = await session.execute(select(User).where(User.username == username))
-    user = result.scalars().first()
+    user = await session.get(User, username)
 
-    if not user or user.password_hash != _hash_password(credentials.password):
+    if not user or not hmac.compare_digest(user.password_hash, _hash_password(credentials.password)):
         raise HTTPException(status_code=401, detail="Invalid username or password")
 
-    jwt_expiration = int(time.time()) + 3600
+    now = int(time.time())
+    jwt_expiration = now + JWT_TTL_SECONDS
     payload = {
         "sub": username,
         "exp": jwt_expiration,
     }
     token = encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-    bearer_token = f"Bearer {token}"
-
-    refresh_token = secrets.token_urlsafe(32)
-    refresh_expires_dt = datetime.utcnow() + timedelta(days=30)
-    refresh_expires = int(refresh_expires_dt.timestamp())
 
     return {
-        "bearer_token": bearer_token,
+        "bearer_token": f"Bearer {token}",
         "jwt": token,
         "token_type": "bearer",
-        "refresh_token": refresh_token,
+        "refresh_token": secrets.token_urlsafe(32),
         "jwt_expires_at": jwt_expiration,
-        "refresh_expires_at": refresh_expires,
+        "refresh_expires_at": now + REFRESH_TTL_SECONDS,
     }
