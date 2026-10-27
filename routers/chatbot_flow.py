@@ -1,9 +1,10 @@
 """
-Chatbot-facing API surface: no-auth-required routes for looking up a
-registered candidate's technical profile and chatting about it. The RAG
-pipeline itself is a LangGraph graph -- see helpers/chatbot_rag.py. All
-routes here are exempt from auth -- see middleware.auth.PUBLIC_PREFIXES
-("/chatbot", "/chat").
+Chatbot-facing API surface: public routes for chatting with a candidate's
+CV ("talk to my CV"). Every registered user has their own bot at
+/chatbot?u=<username>, open to anyone with the link; plain /chatbot uses
+CHATBOT_DEFAULT_USERNAME. The RAG pipeline is a LangGraph graph -- see
+helpers/chatbot_rag.py. /chatbot* and /chat* are exempt from auth (see
+middleware.auth.PUBLIC_PREFIXES); /owner/chat-inbox is not.
 """
 import json
 import time
@@ -17,21 +18,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.connection import get_session
 from db.models import ChatLead, ChatMessage, User, UserDetails
+from config import CHATBOT_DEFAULT_USERNAME
 from helpers.auth_context import get_caller_id, require_username
 from helpers.chatbot_rag import MAX_MESSAGE_CHARS, cached, get_conversation, list_conversations, stream_chat_events
 from services.resume_service import get_resume_profile
 
 router = APIRouter()
 
-# This chatbot deployment is scoped to a single candidate -- every chat
-# answers about this user's profile/resume regardless of who's asking, so
-# it's safe to share as a personal link.
-CHATBOT_LOCKED_USERNAME = "gaurav"
-
-
 class ChatMessageRequest(BaseModel):
     message: str = Field(max_length=MAX_MESSAGE_CHARS)
     conversation_id: str | None = Field(default=None, max_length=64)
+    # Whose CV to chat with; defaults to CHATBOT_DEFAULT_USERNAME.
+    target_username: str | None = Field(default=None, max_length=150)
 
 
 def serialize_user_details(user: User, user_details: UserDetails | None = None) -> dict[str, Any]:
@@ -62,24 +60,39 @@ async def _load_profile(session: AsyncSession, username: str) -> dict[str, Any]:
     return await cached(username, "profile", load)
 
 
+async def _candidate_profile(session: AsyncSession, requested: str | None) -> dict[str, Any]:
+    """The profile of the candidate whose bot is being used (404 if no such user)."""
+    username = (requested or CHATBOT_DEFAULT_USERNAME).strip().lower()
+    try:
+        return await _load_profile(session, username)
+    except HTTPException:
+        raise HTTPException(status_code=404, detail="This chatbot isn't available.") from None
+
+
 def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
 @router.get("/chatbot/user-details")
-async def get_user_details_for_chatbot(session: AsyncSession = Depends(get_session)):
-    """Dedicated route for the (single-candidate) chatbot. Returns only CHATBOT_LOCKED_USERNAME's profile + resume summary."""
-    return await _load_profile(session, CHATBOT_LOCKED_USERNAME)
+async def get_user_details_for_chatbot(u: str | None = None, session: AsyncSession = Depends(get_session)):
+    """Public header info for /chatbot?u=<username>. Deliberately minimal: the CV itself is only reachable through chat answers."""
+    profile = await _candidate_profile(session, u)
+    return {
+        "username": profile["username"],
+        "full_name": profile["full_name"],
+        "has_cv": profile["resume_text_available"],
+    }
 
 
 @router.get("/chat/conversations")
-async def list_chat_conversations(request: Request):
-    return list_conversations(get_caller_id(request))
+async def list_chat_conversations(request: Request, u: str | None = None):
+    return list_conversations(get_caller_id(request), (u or CHATBOT_DEFAULT_USERNAME).strip().lower())
 
 
 @router.get("/chat/conversations/{conversation_id}")
-async def get_chat_conversation(request: Request, conversation_id: str):
-    conversation = await get_conversation(get_caller_id(request), conversation_id)
+async def get_chat_conversation(request: Request, conversation_id: str, u: str | None = None):
+    candidate = (u or CHATBOT_DEFAULT_USERNAME).strip().lower()
+    conversation = await get_conversation(get_caller_id(request), candidate, conversation_id)
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return conversation
@@ -89,7 +102,7 @@ async def get_chat_conversation(request: Request, conversation_id: str):
 async def chat_with_user_stream(payload: ChatMessageRequest, request: Request, session: AsyncSession = Depends(get_session)):
     """
     SSE endpoint: streams the assistant's RAG-grounded answer token-by-token
-    as it's generated. Always answers about CHATBOT_LOCKED_USERNAME.
+    as it's generated, about the CV of `target_username` (default candidate if omitted).
 
     Events: `meta` {conversation_id, sources}, `token` {delta}..., `done` {message, sources}.
     """
@@ -99,11 +112,12 @@ async def chat_with_user_stream(payload: ChatMessageRequest, request: Request, s
 
     caller = get_caller_id(request)
     conversation_id = payload.conversation_id or str(int(time.time() * 1000))
-    # Loaded before streaming starts so a missing user is still a clean 404.
-    profile = await _load_profile(session, CHATBOT_LOCKED_USERNAME)
+    # Loaded before streaming starts so an unavailable chatbot is still a clean 404.
+    profile = await _candidate_profile(session, payload.target_username)
+    candidate = profile["username"]
 
     async def event_generator():
-        async for event in stream_chat_events(caller, conversation_id, user_message, CHATBOT_LOCKED_USERNAME, profile):
+        async for event in stream_chat_events(caller, conversation_id, user_message, candidate, profile):
             if "meta" in event:
                 yield _sse("meta", {"conversation_id": conversation_id, "sources": event["meta"]})
             elif "token" in event:
@@ -121,18 +135,24 @@ async def chat_with_user_stream(payload: ChatMessageRequest, request: Request, s
 @router.get("/owner/chat-inbox")
 async def chat_inbox(request: Request, limit: int = 20, session: AsyncSession = Depends(get_session)):
     """
-    Private to the candidate (requires CHATBOT_LOCKED_USERNAME's JWT): contact
-    details visitors left in the chat, plus recent conversations with every message.
+    The signed-in user's own chatbot inbox: contact details visitors left in
+    their chat, plus recent conversations with every message.
     """
-    if require_username(request) != CHATBOT_LOCKED_USERNAME:
-        raise HTTPException(status_code=403, detail="Only the candidate can read the chat inbox")
+    me = require_username(request)
     limit = max(1, min(limit, 100))
+    # Rows logged before chats were tagged by candidate belong to the default candidate.
+    mine_lead = ChatLead.candidate == me
+    mine_msg = ChatMessage.candidate == me
+    if me == CHATBOT_DEFAULT_USERNAME:
+        mine_lead = mine_lead | ChatLead.candidate.is_(None)
+        mine_msg = mine_msg | ChatMessage.candidate.is_(None)
 
-    leads = (await session.execute(select(ChatLead).order_by(ChatLead.created_at.desc()).limit(50))).scalars().all()
+    leads = (await session.execute(select(ChatLead).where(mine_lead).order_by(ChatLead.created_at.desc()).limit(50))).scalars().all()
 
     recent = (
         await session.execute(
             select(ChatMessage.conversation_id, func.max(ChatMessage.created_at).label("last_at"))
+            .where(mine_msg)
             .group_by(ChatMessage.conversation_id)
             .order_by(func.max(ChatMessage.created_at).desc())
             .limit(limit)
@@ -141,7 +161,7 @@ async def chat_inbox(request: Request, limit: int = 20, session: AsyncSession = 
     conversation_ids = [row.conversation_id for row in recent]
     messages = (
         await session.execute(
-            select(ChatMessage).where(ChatMessage.conversation_id.in_(conversation_ids)).order_by(ChatMessage.created_at, ChatMessage.id)
+            select(ChatMessage).where(mine_msg, ChatMessage.conversation_id.in_(conversation_ids)).order_by(ChatMessage.created_at, ChatMessage.id)
         )
     ).scalars().all()
 

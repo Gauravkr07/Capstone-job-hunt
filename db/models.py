@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, Column, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
@@ -17,9 +17,12 @@ class User(Base):
     linkedin_url = Column(String(255), nullable=True)
     leetcode_url = Column(String(255), nullable=True)
     hackerrank_url = Column(String(255), nullable=True)
+    created_at = Column(DateTime, nullable=True, default=datetime.utcnow)
 
 
 class UserDetails(Base):
+    """The user's CV profile -- exactly one row per user, fully replaced on every CV upload."""
+
     __tablename__ = "user_details"
 
     id = Column(Integer, primary_key=True, autoincrement=True, index=True)
@@ -28,6 +31,8 @@ class UserDetails(Base):
     skills = Column(JSON, nullable=True)
     experience = Column(Integer, nullable=True)
     industry_type = Column(String(255), nullable=True)
+    resume_source = Column(String(20), nullable=True)  # "file" | "text" | "url"
+    resume_filename = Column(String(500), nullable=True)  # file name or URL it came from
     vector = Column(JSON, nullable=True)
     embedding_model = Column(String(100), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
@@ -81,6 +86,7 @@ class Job(Base):
 
     industry_type = Column(String(255), nullable=True)
     role = Column(String(255), nullable=True)
+    posted_by = Column(String(150), ForeignKey("users.username"), nullable=True, index=True)
 
     status = Column(String(20), nullable=False, default="ACTIVE", index=True)
     content_hash = Column(String(64), nullable=False, unique=True, index=True)
@@ -112,12 +118,41 @@ class JobSkill(Base):
     __table_args__ = (UniqueConstraint("job_id", "skill_id", name="uq_job_skill"),)
 
 
+class JobMatch(Base):
+    """
+    Stored recommendation: how well one user's CV matches one job. Recomputed
+    for a user whenever their CV changes and for every user when a job is
+    added, so reading recommendations is a single indexed query.
+    """
+
+    __tablename__ = "job_matches"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(150), ForeignKey("users.username", ondelete="CASCADE"), nullable=False)
+    job_id = Column(Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    vector_score = Column(Float, nullable=False)
+    skill_score = Column(Float, nullable=False)
+    fused_score = Column(Float, nullable=False)
+    has_skill_data = Column(Boolean, nullable=False, default=True)
+    matched_required_skills = Column(JSON, nullable=False, default=list)
+    missing_required_skills = Column(JSON, nullable=False, default=list)
+    matched_preferred_skills = Column(JSON, nullable=False, default=list)
+    missing_preferred_skills = Column(JSON, nullable=False, default=list)
+    computed_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("username", "job_id", name="uq_job_match_user_job"),
+        Index("ix_job_matches_user_score", "username", "fused_score"),
+    )
+
+
 class ChatMessage(Base):
     """Every chatbot turn, so the candidate can review who talked to their assistant."""
 
     __tablename__ = "chat_messages"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    candidate = Column(String(150), nullable=True, index=True)  # whose chatbot this was
     conversation_id = Column(String(64), nullable=False, index=True)
     visitor = Column(String(150), nullable=False)
     role = Column(String(20), nullable=False)
@@ -131,6 +166,7 @@ class ChatLead(Base):
     __tablename__ = "chat_leads"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    candidate = Column(String(150), nullable=True, index=True)  # whose chatbot received it
     conversation_id = Column(String(64), nullable=False, index=True)
     visitor = Column(String(150), nullable=False)
     email = Column(String(255), nullable=True)

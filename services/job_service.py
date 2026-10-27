@@ -8,6 +8,9 @@ from db.models import Company, Job, JobSkill, Skill
 from db.vector_store import upsert_job_vector
 from helpers.embeddings import EMBEDDING_MODEL_NAME, embed_text
 from helpers.jd_scraper import scrape_job_description
+from helpers.logger import get_logger
+
+logger = get_logger("job_service")
 
 
 def _apply_job_filters(query, status: str | None, industry_type: str | None):
@@ -82,22 +85,28 @@ async def fetch_job_skills(session: AsyncSession, job_ids: list[int]) -> dict[in
     return result
 
 
-def index_job_vector(job: Job, company_name: str, skills: list[str], cleaned_description: str | None) -> None:
-    """Embed one job and upsert it into Qdrant. Shared by ingestion and the Postgres -> Qdrant reindex."""
-    embedding_text = "\n".join(
+def job_embedding_text(
+    title: str, company_name: str, skills: list[str], industry_type: str | None, cleaned_description: str | None
+) -> str:
+    """The text a job is embedded from -- shared by stored jobs and unsaved JD checks so scores are comparable."""
+    return "\n".join(
         part
         for part in [
-            f"Title: {job.title}",
+            f"Title: {title}",
             f"Company: {company_name}",
             f"Skills: {', '.join(skills)}" if skills else "",
-            f"Industry: {job.industry_type}" if job.industry_type else "",
+            f"Industry: {industry_type}" if industry_type else "",
             cleaned_description or "",
         ]
         if part
     )
+
+
+def index_job_vector(job: Job, company_name: str, skills: list[str], cleaned_description: str | None) -> None:
+    """Embed one job and upsert it into Qdrant. Shared by ingestion and the Postgres -> Qdrant reindex."""
     upsert_job_vector(
         job.id,
-        embed_text(embedding_text),
+        embed_text(job_embedding_text(job.title, company_name, skills, job.industry_type, cleaned_description)),
         {
             "title": job.title,
             "company": company_name,
@@ -126,6 +135,7 @@ async def ingest_job(
     salary_max: int | None = None,
     salary_currency: str | None = None,
     extracted: dict | None = None,
+    posted_by: str | None = None,
 ) -> tuple[Job, bool]:
     """
     Deduplicate by content hash, persist structured fields + required/preferred
@@ -174,6 +184,7 @@ async def ingest_job(
         salary_currency=salary_currency,
         industry_type=extracted["industry_type"],
         status="ACTIVE",
+        posted_by=posted_by,
         content_hash=content_hash,
         embedding_model=EMBEDDING_MODEL_NAME,
     )
@@ -197,6 +208,15 @@ async def ingest_job(
         index_job_vector, job, company_name, extracted["skills"], extracted["cleaned_description"]
     )
 
+    # Score the new job against every candidate's CV so it shows up in their
+    # recommendations immediately. (Imported here: ats_service imports this module.)
+    from services.ats_service import refresh_matches_for_job
+
+    try:
+        await refresh_matches_for_job(session, job.id)
+    except Exception as exc:  # the job is saved either way; matches catch up on the next reindex/CV upload
+        await session.rollback()
+        logger.warning("Could not score job %s against candidates: %s", job.id, exc)
     return job, False
 
 

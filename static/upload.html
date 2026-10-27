@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <title>Job Posting Upload</title>
 <style>
-  body { font-family: -apple-system, Segoe UI, Arial, sans-serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+  body { font-family: "Times New Roman", Times, serif; max-width: 720px; margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
   h1 { font-size: 1.3rem; }
   fieldset { margin-bottom: 24px; padding: 16px; border: 1px solid #ddd; border-radius: 8px; }
   legend { font-weight: 600; padding: 0 8px; }
@@ -50,6 +50,15 @@
 
 <script>
 let jwt = null;
+
+// Already signed in to the JobHunt app? Reuse that session instead of logging in again.
+try {
+  const session = JSON.parse(localStorage.getItem('jobhunt_session') || 'null');
+  if (session && session.jwt && session.expiresAt * 1000 > Date.now()) {
+    jwt = session.jwt;
+    document.querySelector('fieldset').hidden = true;  // the login step
+  }
+} catch (_) {}
 
 const loginBtn = document.getElementById('loginBtn');
 const loginStatus = document.getElementById('loginStatus');

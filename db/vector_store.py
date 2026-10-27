@@ -155,7 +155,12 @@ def upsert_resume_vector(
     skills: list[str],
     industry_type: str | None,
     experience: int | None,
+    contact: dict[str, Any] | None = None,
 ) -> None:
+    """
+    One point per user: the CV profile vector plus the user's basic details
+    (name, email, profile links) so search results are self-describing.
+    """
     if not vector:
         logger.warning("Skipping Qdrant upsert for %s: empty vector", username)
         return
@@ -174,6 +179,7 @@ def upsert_resume_vector(
                 vector=vector,
                 payload={
                     "username": username,
+                    **(contact or {}),
                     "skills": skills,
                     "industry_type": industry_type,
                     "experience": experience,
@@ -183,6 +189,16 @@ def upsert_resume_vector(
     )
     duration_ms = (time.perf_counter() - start) * 1000
     logger.info("Upserted vector for %s into %s in %.1fms", username, RESUME_COLLECTION, duration_ms)
+
+
+def search_resume_profiles(vector: list[float], limit: int = 500) -> list[dict[str, Any]]:
+    """Every user's profile point most similar to `vector` (e.g. a new job), with vectors, for scoring."""
+    if not vector:
+        return []
+    client = _get_client()
+    _ensure_collection(RESUME_COLLECTION)
+    results = client.query_points(collection_name=RESUME_COLLECTION, query=vector, limit=limit, with_vectors=True)
+    return [{"score": p.score, "vector": p.vector, "payload": p.payload} for p in results.points]
 
 
 def delete_resume_vector(username: str) -> None:

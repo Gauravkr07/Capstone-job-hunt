@@ -1,4 +1,5 @@
 import io
+import re
 
 from helpers.logger import get_logger
 
@@ -6,11 +7,18 @@ logger = get_logger("resume_file_parser")
 
 
 def _extract_pdf_text(content: bytes) -> str:
-    from pypdf import PdfReader
+    """
+    pdfminer.six rebuilds the spaces between words from glyph positions. Many
+    CV generators place each word separately without space characters, and
+    simpler extractors (e.g. pypdf) then return "SoftwareEngineerwith5+years...",
+    which wrecks both embeddings and keyword matching.
+    """
+    from pdfminer.high_level import extract_text
 
-    reader = PdfReader(io.BytesIO(content))
-    pages = [page.extract_text() or "" for page in reader.pages]
-    return "\n".join(pages)
+    text = extract_text(io.BytesIO(content))
+    text = re.sub(r"\(cid:\d+\)", "•", text)  # unmapped glyphs -- in CVs almost always the bullet symbol
+    text = re.sub(r"(\w)-\n(?=[a-z])", r"\1", text)  # re-join words hyphenated across lines
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
 def _extract_docx_text(content: bytes) -> str:

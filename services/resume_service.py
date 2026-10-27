@@ -5,12 +5,16 @@ from fastapi import HTTPException
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import ResumeChunk, UserDetails
+from db.models import ResumeChunk, User, UserDetails
 from db.vector_store import delete_resume_data, upsert_resume_chunks, upsert_resume_vector
 from helpers.chatbot_rag import invalidate_candidate_cache
 from helpers.embeddings import EMBEDDING_MODEL_NAME, embed_profile, embed_texts
-from helpers.resume_chunker import chunk_resume
+from helpers.resume_chunker import chunk_embedding_text, chunk_resume
 from helpers.resume_scraper import scrape_resume
+from helpers.logger import get_logger
+from services.ats_service import refresh_matches_for_user
+
+logger = get_logger("resume_service")
 
 
 async def get_resume_profile(session: AsyncSession, username: str) -> UserDetails | None:
@@ -18,15 +22,35 @@ async def get_resume_profile(session: AsyncSession, username: str) -> UserDetail
     return result.scalars().first()
 
 
+def contact_payload(user: User | None) -> dict:
+    """Basic registration details stored alongside the CV profile vector in Qdrant."""
+    if not user:
+        return {}
+    return {
+        "full_name": user.full_name,
+        "email": user.email,
+        "linkedin_url": user.linkedin_url,
+        "leetcode_url": user.leetcode_url,
+        "hackerrank_url": user.hackerrank_url,
+    }
+
+
 async def save_resume_profile(
     username: str,
     resume_text: str,
     session: AsyncSession,
+    source: str | None = None,
+    filename: str | None = None,
 ) -> UserDetails:
     """
-    Shared pipeline for any resume ingestion path (raw text, URL, or file upload):
-    scrape skills/experience/industry, embed the profile summary and section
-    chunks, and persist both to Postgres and Qdrant.
+    Shared pipeline for any resume ingestion path (raw text, URL, or file upload).
+    A new CV fully replaces the old one everywhere:
+      1. Postgres: user_details (skills, experience, industry, vector) and all
+         resume_chunks rows are overwritten in one commit.
+      2. Qdrant: the user's profile point (CV vector + basic details/links) and
+         all CV chunk points are deleted, then re-written.
+      3. job_matches: the user's stored recommendations are recomputed.
+    `source` is "file" | "text" | "url"; `filename` is the file name or URL.
     """
     try:
         extracted = scrape_resume(resume_text)
@@ -42,7 +66,7 @@ async def save_resume_profile(
     # CPU-bound: embed the profile summary and every section chunk off the event loop,
     # chunks in a single batched encode() call.
     embedding, chunk_vectors = await asyncio.to_thread(
-        lambda: (embed_profile(skills, industry_type, experience), embed_texts([chunk.text for chunk in chunks]))
+        lambda: (embed_profile(skills, industry_type, experience), embed_texts([chunk_embedding_text(c.section, c.text) for c in chunks]))
     )
 
     user_details = await get_resume_profile(session, username)
@@ -54,6 +78,8 @@ async def save_resume_profile(
         user_details.industry_type = industry_type
         user_details.vector = embedding
         user_details.embedding_model = EMBEDDING_MODEL_NAME
+        user_details.resume_source = source
+        user_details.resume_filename = filename
         user_details.updated_at = datetime.utcnow()
     else:
         user_details = UserDetails(
@@ -64,6 +90,8 @@ async def save_resume_profile(
             industry_type=industry_type,
             vector=embedding,
             embedding_model=EMBEDDING_MODEL_NAME,
+            resume_source=source,
+            resume_filename=filename,
         )
         session.add(user_details)
 
@@ -91,9 +119,17 @@ async def save_resume_profile(
     # Qdrant: wipe the old profile point and chunks unconditionally (even if the new CV
     # yields no vector/chunks, nothing stale may survive), then write the new data.
     await asyncio.to_thread(delete_resume_data, username)
-    await asyncio.to_thread(upsert_resume_vector, username, embedding, skills, industry_type, experience)
+    user = await session.get(User, username)
+    await asyncio.to_thread(
+        upsert_resume_vector, username, embedding, skills, industry_type, experience, contact_payload(user)
+    )
     if chunk_payloads:
         await asyncio.to_thread(upsert_resume_chunks, username, chunk_payloads)
 
     invalidate_candidate_cache(username)
+    try:
+        await refresh_matches_for_user(session, username)
+    except Exception as exc:  # the CV is saved either way; recommendations recompute on first read
+        await session.rollback()
+        logger.warning("Could not refresh job matches for %s: %s", username, exc)
     return user_details

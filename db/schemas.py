@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 from typing import Optional
 
 
@@ -14,6 +14,10 @@ class ResumeFetchResponse(BaseModel):
     experience: Optional[int] = None
     industry_type: Optional[str] = None
     vector: Optional[list[float]] = None
+    sections: list[str] = []
+    updated_at: Optional[datetime] = None
+    resume_source: Optional[str] = None
+    resume_filename: Optional[str] = None
 
 
 class JobCreate(BaseModel):
@@ -137,3 +141,28 @@ class LoginResponse(BaseModel):
     refresh_token: str
     jwt_expires_at: int
     refresh_expires_at: int
+
+
+class AnalyzeJdRequest(BaseModel):
+    raw_text: str = Field(min_length=30, max_length=30000)
+    save_to_pool: bool = False
+    include_explanation: bool = True
+
+
+class AnalyzedJob(BaseModel):
+    title: str
+    company_name: str
+    location: Optional[list[str]] = None
+    remote_type: Optional[str] = None
+    employment_type: Optional[str] = None
+    experience_min: Optional[int] = None
+    experience_max: Optional[int] = None
+    industry_type: Optional[str] = None
+    required_skills: list[str] = []
+    preferred_skills: list[str] = []
+
+
+class AnalyzeJdResponse(BaseModel):
+    job: AnalyzedJob
+    saved_job_id: Optional[int] = None
+    match: AtsCheckResponse

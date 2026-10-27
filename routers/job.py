@@ -1,7 +1,7 @@
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.security import HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -9,6 +9,7 @@ from db.connection import get_session
 from db.schemas import JobCreate, JobListResponse, JobRawTextCreate, JobResponse
 from helpers.jd_scraper import parse_raw_job_posting
 from helpers.job_board_fetch import fetch_and_filter
+from helpers.auth_context import require_username
 from helpers.logger import get_logger
 from services.job_service import build_job_response, build_job_responses, ingest_job, list_jobs
 
@@ -20,7 +21,7 @@ security = HTTPBearer()
 
 
 @router.post("/exportJobDesc", response_model=JobResponse, dependencies=[Depends(security)])
-async def insert_job_description(job_data: JobCreate, session: AsyncSession = Depends(get_session)):
+async def insert_job_description(job_data: JobCreate, request: Request, session: AsyncSession = Depends(get_session)):
     """
     Ingest a job posting from structured fields (jd, company_name, position, etc.).
 
@@ -45,6 +46,7 @@ async def insert_job_description(job_data: JobCreate, session: AsyncSession = De
         salary_min=job_data.salary_min,
         salary_max=job_data.salary_max,
         salary_currency=job_data.salary_currency,
+        posted_by=require_username(request),
     )
     return await build_job_response(session, job, is_duplicate)
 
@@ -61,7 +63,7 @@ def _require_text(value: Any | None, field_name: str) -> str:
 
 
 @router.post("/scrapeJobPosting", response_model=JobResponse, dependencies=[Depends(security)])
-async def scrape_job_posting(job_data: JobRawTextCreate, session: AsyncSession = Depends(get_session)):
+async def scrape_job_posting(job_data: JobRawTextCreate, request: Request, session: AsyncSession = Depends(get_session)):
     """
     Ingest a job posting from raw, unstructured text (e.g. pasted from a job
     board) -- no separate title/company/location fields required.
@@ -94,6 +96,7 @@ async def scrape_job_posting(job_data: JobRawTextCreate, session: AsyncSession =
         source_url=job_data.source_url,
         external_job_id=job_data.external_job_id,
         extracted=parsed,
+        posted_by=require_username(request),
     )
     return await build_job_response(session, job, is_duplicate)
 

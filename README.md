@@ -19,7 +19,7 @@ and scores/ranks job matches against a candidate's resume.
 | Structured JD extraction | **Groq API** (optional, hosted LLM) | Extracts title/company/location/skills/experience from raw, unstructured job postings. Falls back to regex/keyword heuristics automatically if no key is configured or the call fails. |
 | RAG match explanation | **Groq API** + Qdrant retrieval | Retrieves the resume chunks most relevant to a job, then generates a grounded natural-language explanation of the match using only that retrieved text — see `POST /jobs/atsCheck` (`include_explanation`) and `POST /jobs/explainMatch`. |
 | Chatbot orchestration | **LangGraph** | `helpers/chatbot_rag.py`: a `StateGraph` (embed query → parallel resume/job retrieval → streamed generation) with checkpointer-backed conversation memory. Served by `POST /chat/stream`. |
-| File parsing | **pypdf**, **python-docx** | Extracts text from uploaded PDF/DOCX resumes. |
+| File parsing | **pdfminer.six**, **python-docx** | Extracts text from uploaded PDF/DOCX resumes (pdfminer rebuilds the spaces between words that many CV PDFs omit). |
 | Auth | Custom JWT (HMAC-SHA256, no external auth library) | `middleware/auth.py` — stateless bearer-token auth. |
 | Containerization | **Docker Compose** | Runs `postgres`, `qdrant`, and `fastapi` together. |
 
@@ -438,19 +438,36 @@ docker compose exec fastapi python -m services.reindex
 ## 7. Data Model Summary
 
 ```
-users ──< user_details (resume profile: skills, experience, industry, vector)
-  │        └──< resume_chunks (per-section text + vector)
-  │
-companies ──< jobs ──< job_skills >── skills
-                │
-                └── location is a JSON list (a job can have multiple locations)
+users ─┬─ user_details      CV profile: text, skills, experience, industry, vector,
+       │                    resume_source/filename -- ONE row, replaced on every upload
+       ├──< resume_chunks   section-labelled CV chunks -- replaced on every upload
+       ├──< job_matches >── jobs ──< job_skills >── skills
+       │    stored recommendation per (user, job): scores + matched/missing skills
+       ├──< chat_messages / chat_leads   (candidate = whose chatbot)
+       └──< jobs.posted_by
+companies ──< jobs
 ```
 
-- One `Company` row per company name, looked-up-or-created — never
-  duplicated across multiple job postings from the same employer.
-- `job_skills.importance` is `"required"` or `"preferred"`.
-- Postgres is the source of truth; Qdrant is a derived, always-rebuildable
-  search index kept in sync on every write.
+| Table | Holds | Written when |
+|---|---|---|
+| `users` | Registration details, `created_at` | Register |
+| `user_details` / `resume_chunks` | The user's single CV | Every CV upload fully replaces both |
+| `jobs` / `job_skills` / `companies` | Job postings (title, description, location, remote/employment type, experience and salary range, industry, status, source, `posted_by`) and required/preferred skills | Job posted or imported |
+| `job_matches` | Recommendation scores for each user × job | Recomputed for a user on CV upload, and for every user when a job is added |
+| `chat_messages` / `chat_leads` | Chatbot log and recruiter contacts, per candidate | Every chat turn |
+
+**Qdrant** mirrors what search needs: `resume_profiles` (one point per user:
+CV vector + basic details and profile links), `resume_chunks` (CV chunks
+only) and `job_postings`. Postgres stays the source of truth; rebuild Qdrant
+and all stored matches with `python -m services.reindex`.
+
+New columns on existing tables are added at startup by idempotent
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements in `db/connection.py`.
+
+**Chatbot per user:** `/chatbot?u=<username>` answers from that user's CV
+and is open to anyone with the link (shown on Home and My CV). Plain `/chatbot` uses
+`CHATBOT_DEFAULT_USERNAME` (env, default `gaurav66`). Each user reads their own
+leads and conversations at `GET /owner/chat-inbox`.
 
 ---
 

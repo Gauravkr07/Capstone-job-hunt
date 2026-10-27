@@ -3,13 +3,16 @@ import hmac
 import secrets
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.security import HTTPBearer
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from config import CHATBOT_DEFAULT_USERNAME
 from db.connection import get_session
 from db.models import User
 from db.schemas import LoginResponse, UserCreate
+from helpers.auth_context import require_username
 from middleware.auth import SECRET_KEY, ALGORITHM, encode
 
 router = APIRouter()
@@ -25,6 +28,25 @@ def _hash_password(password: str) -> str:
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+security = HTTPBearer()
+
+
+def _account(user: User) -> dict:
+    return {
+        "username": user.username,
+        "full_name": user.full_name,
+        "email": user.email,
+        "age": user.age,
+        "graduated": user.graduated,
+        "linkedin_url": user.linkedin_url,
+        "leetcode_url": user.leetcode_url,
+        "hackerrank_url": user.hackerrank_url,
+        # The default candidate's bot is the plain /chatbot link already shared with recruiters.
+        "chatbot_path": "/chatbot" if user.username == CHATBOT_DEFAULT_USERNAME else f"/chatbot?u={user.username}",
+        "created_at": user.created_at,
+    }
 
 
 @router.post("/register")
@@ -79,3 +101,12 @@ async def login(credentials: LoginRequest, session: AsyncSession = Depends(get_s
         "jwt_expires_at": jwt_expiration,
         "refresh_expires_at": now + REFRESH_TTL_SECONDS,
     }
+
+
+@router.get("/me", dependencies=[Depends(security)])
+async def get_me(request: Request, session: AsyncSession = Depends(get_session)):
+    """The signed-in user's registration details and their public chatbot path."""
+    user = await session.get(User, require_username(request))
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return _account(user)

@@ -7,14 +7,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.connection import get_session
 from db.models import Job
-from db.schemas import AtsCheckRequest, AtsCheckResponse, ExplainMatchRequest, ExplainMatchResponse, JobRecommendationsResponse
+from db.schemas import (
+    AnalyzeJdRequest,
+    AnalyzeJdResponse,
+    AtsCheckRequest,
+    AtsCheckResponse,
+    ExplainMatchRequest,
+    ExplainMatchResponse,
+    JobRecommendationsResponse,
+)
 from helpers.auth_context import require_username
-from services.ats_service import compute_ats_match, explain_match, get_job_recommendations
-from services.job_service import build_job_responses
+from helpers.jd_scraper import parse_raw_job_posting
+from services.ats_service import analyze_job_description, compute_ats_match, explain_match, get_job_recommendations
+from services.job_service import build_job_responses, ingest_job
 
 router = APIRouter(prefix="/jobs", tags=["ats"])
 
 security = HTTPBearer()
+
+# Fields of a parsed job description echoed back by /jobs/analyzeJd.
+ANALYZED_JOB_FIELDS = (
+    "title", "company_name", "location", "remote_type", "employment_type",
+    "experience_min", "experience_max", "industry_type", "required_skills", "preferred_skills",
+)
 
 
 @router.post("/atsCheck", response_model=AtsCheckResponse, dependencies=[Depends(security)])
@@ -62,6 +77,7 @@ async def check_ats_match(
 async def get_recommendations(
     request: Request,
     limit: int = Query(default=10, ge=1, le=50),
+    min_score: float = Query(default=0.0, ge=0.0, le=1.0, description="Only return jobs with fused_score >= this, e.g. 0.45"),
     session: AsyncSession = Depends(get_session),
 ):
     """
@@ -81,7 +97,7 @@ async def get_recommendations(
     username = require_username(request)
 
     try:
-        results = await get_job_recommendations(session, username, limit=limit)
+        results = await get_job_recommendations(session, username, limit=limit, min_score=min_score)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -131,3 +147,44 @@ async def explain_job_match(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     return result
+
+
+@router.post("/analyzeJd", response_model=AnalyzeJdResponse, dependencies=[Depends(security)])
+async def analyze_jd(payload: AnalyzeJdRequest, request: Request, session: AsyncSession = Depends(get_session)):
+    """
+    Paste any job description and get the caller's match score, matched and
+    missing skills, and (optionally) a grounded explanation -- without
+    storing the job. Set `save_to_pool: true` to also add it to the shared job
+    pool (deduplicated), so other candidates can match against it too.
+    """
+    username = require_username(request)
+    raw_text = payload.raw_text.strip()
+    try:
+        parsed = await parse_raw_job_posting(raw_text, require_identity=payload.save_to_pool)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    saved_job_id = None
+    try:
+        if payload.save_to_pool:
+            job, _ = await ingest_job(
+                session,
+                title=parsed["title"],
+                company_name=parsed["company_name"],
+                jd_text=raw_text,
+                location=parsed.get("location"),
+                extracted=parsed,
+                posted_by=username,
+            )
+            saved_job_id = job.id
+            result = await compute_ats_match(session, username, job.id, include_explanation=payload.include_explanation)
+        else:
+            result = await analyze_job_description(username, parsed, include_explanation=payload.include_explanation)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return {
+        "job": {key: parsed.get(key) for key in ANALYZED_JOB_FIELDS},
+        "saved_job_id": saved_job_id,
+        "match": asdict(result),
+    }

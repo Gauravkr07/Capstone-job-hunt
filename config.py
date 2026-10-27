@@ -28,3 +28,7 @@ JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key")
 # Optional: POSTed {"text": ..., "content": ...} whenever a chatbot visitor leaves
 # contact details (works with Slack/Discord incoming webhooks). Leave unset to skip.
 LEAD_WEBHOOK_URL = os.getenv("LEAD_WEBHOOK_URL")
+
+# Whose CV the chatbot answers about at plain /chatbot (no ?u=<username>) --
+# the link already shared with recruiters, so it must stay the same.
+CHATBOT_DEFAULT_USERNAME = os.getenv("CHATBOT_DEFAULT_USERNAME", "gaurav66")

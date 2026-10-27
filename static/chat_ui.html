@@ -3,7 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Capstone Job Hunt — Assistant</title>
+  <title>Talk to my CV</title>
+  <script>
+    // Apply the saved theme before first paint (default: dark) so there's no light flash.
+    (function () {
+      var theme = "dark";
+      try { theme = localStorage.getItem("jobhunt_theme") || "dark"; } catch (e) {}
+      document.documentElement.setAttribute("data-theme", theme);
+    })();
+  </script>
   <style>
     :root{
       --ink:#14171C;
@@ -19,8 +27,24 @@
       --match-low:#B3705E;
       --radius:10px;
     }
+    /* Day theme (dark is the default above); shares the app's saved choice. */
+    :root[data-theme="light"]{
+      --ink:#F5F6F8;
+      --panel:#FFFFFF;
+      --panel-raised:#EEF0F3;
+      --line:#DDE1E7;
+      --gold:#C9A961;
+      --gold-dim:#9C7E3C;
+      --text:#14171C;
+      --text-dim:#5B6270;
+      --match-high:#2F7A55;
+    }
+    :root[data-theme="light"] .brand span, :root[data-theme="light"] #new-chat{color:#7A5C14;}
+    #theme-btn{flex:none; width:34px; height:34px; border-radius:50%; border:1px solid var(--line); background:var(--panel); color:var(--text); display:grid; place-items:center; cursor:pointer;}
+    #topbar-right{display:flex; align-items:center; gap:10px;}
     *{box-sizing:border-box;} html,body{height:100%;}
-    body{margin:0; background:var(--ink); color:var(--text); font-family:Inter, Arial, sans-serif; display:flex; overflow:hidden;}
+    button, input, textarea, select{font-family:inherit;} /* form controls don't inherit fonts by default */
+    body{margin:0; background:var(--ink); color:var(--text); font-family:"Times New Roman", Times, serif; display:flex; overflow:hidden;}
     #sidebar{width:264px; background:var(--panel); border-right:1px solid var(--line); display:flex; flex-direction:column; padding:20px 14px;}
     .brand{font-size:19px; font-weight:600; padding:2px 8px 4px; }
     .brand span{color:var(--gold);}
@@ -98,7 +122,7 @@
 </head>
 <body>
   <div id="sidebar">
-    <div class="brand">Gaurav <span>Kumar</span></div>
+    <div class="brand" id="brand-name">Talk to <span>my CV</span></div>
     <div class="brand-sub">Talk to my CV</div>
     <button id="new-chat">+ New conversation</button>
     <div id="convo-list"></div>
@@ -113,13 +137,16 @@
         </button>
         <h1 id="convo-title">New conversation</h1>
       </div>
-      <span id="status-pill">not connected</span>
+      <div id="topbar-right">
+        <button id="theme-btn" type="button"></button>
+        <span id="status-pill">not connected</span>
+      </div>
     </div>
 
     <div id="thread">
       <div id="empty-state">
-        <h2>Chat with Gaurav</h2>
-        <p>An AI version of Gaurav that answers from his CV. Ask about experience, skills, projects or education. Recruiters can leave an email to get in touch.</p>
+        <h2 id="es-title">Chat with my CV</h2>
+        <p id="es-text">An AI assistant that answers from this candidate's CV. Ask about experience, skills, projects or education. Recruiters can leave an email to get in touch.</p>
         <div class="suggestions">
           <button class="suggestion" data-q="Hi!">Hi!</button>
           <button class="suggestion" data-q="Tell me about your experience">Tell me about your experience</button>
@@ -201,10 +228,42 @@
         };
       }
 
+      // Whose CV this bot answers from: /chatbot?u=<username>; empty = the site's default candidate.
+      const candidate = (new URLSearchParams(window.location.search).get('u') || '').trim().toLowerCase();
+      let candidateName = '';
+
       function buildUserUrl(path){
         const url = new URL(path, state.apiBase + '/');
         url.searchParams.set('username', state.username);
+        if (candidate) url.searchParams.set('u', candidate);
         return url.toString();
+      }
+
+      const escapeText = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      const firstName = () => (candidateName || '').split(' ')[0];
+      const emptyTitle = () => firstName() ? `Chat with ${firstName()}` : 'Chat with my CV';
+      const emptyText = () => (firstName() ? `An AI version of ${firstName()} that answers from their CV.` : "An AI assistant that answers from this candidate's CV.")
+        + ' Ask about experience, skills, projects or education. Recruiters can leave an email to get in touch.';
+
+      // Fill in whose bot this is, or explain that it isn't available.
+      async function loadCandidate(){
+        try {
+          const res = await fetch(buildUserUrl('/chatbot/user-details'));
+          if (!res.ok) throw new Error('unavailable');
+          const data = await res.json();
+          candidateName = data.full_name || data.username;
+          const [first, ...rest] = candidateName.split(' ');
+          document.getElementById('brand-name').innerHTML = escapeText(first) + (rest.length ? ' <span>' + escapeText(rest.join(' ')) + '</span>' : '');
+          document.title = `Chat with ${candidateName}`;
+          const title = document.getElementById('es-title');
+          const text = document.getElementById('es-text');
+          if (title) title.textContent = emptyTitle();
+          if (text) text.textContent = emptyText();
+        } catch (_) {
+          thread.innerHTML = '<div id="empty-state"><h2>This chatbot isn\'t available</h2><p>The link may be wrong, or its owner has switched it off.</p></div>';
+          input.disabled = true;
+          sendBtn.disabled = true;
+        }
       }
 
       // Minimal renderer for the chatbot's fixed output shape: an opening
@@ -282,8 +341,8 @@
         // when missing, but always (re)attach the starter-button handlers.
         if (!document.getElementById('empty-state')) thread.innerHTML = `
           <div id="empty-state">
-            <h2>Chat with Gaurav</h2>
-            <p>An AI version of Gaurav that answers from his CV. Ask about experience, skills, projects or education. Recruiters can leave an email to get in touch.</p>
+            <h2 id="es-title">${escapeText(emptyTitle())}</h2>
+            <p id="es-text">${escapeText(emptyText())}</p>
             <div class="suggestions">
               <button class="suggestion" data-q="Hi!">Hi!</button>
               <button class="suggestion" data-q="Tell me about your experience">Tell me about your experience</button>
@@ -408,7 +467,7 @@
           const res = await fetch(buildUserUrl('/chat/stream'), {
             method: 'POST',
             headers: authHeaders(),
-            body: JSON.stringify({ message, conversation_id: state.conversationId, username: state.username }),
+            body: JSON.stringify({ message, conversation_id: state.conversationId, target_username: candidate || null }),
           });
 
           if (!res.ok || !res.body) {
@@ -460,6 +519,23 @@
       narrow.addEventListener('change', syncPlaceholder);
       syncPlaceholder();
 
+      // Day/night toggle -- same saved setting (jobhunt_theme) as the main app.
+      const themeBtn = document.getElementById('theme-btn');
+      const SUN = '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>';
+      const MOON = '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>';
+      function paintThemeBtn(){
+        const dark = document.documentElement.getAttribute('data-theme') !== 'light';
+        themeBtn.innerHTML = dark ? SUN : MOON;
+        themeBtn.setAttribute('aria-label', dark ? 'Switch to day mode' : 'Switch to night mode');
+      }
+      themeBtn.onclick = () => {
+        const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+        document.documentElement.setAttribute('data-theme', next);
+        try { localStorage.setItem('jobhunt_theme', next); } catch (_) {}
+        paintThemeBtn();
+      };
+      paintThemeBtn();
+
       sendBtn.onclick = sendMessage;
       input.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' && !event.shiftKey) {
@@ -472,6 +548,7 @@
       if (jwtInput) jwtInput.value = state.username;
       refreshStatus();
       renderEmptyState();
+      loadCandidate();
       loadConversations();
     })();
   </script>

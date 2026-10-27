@@ -3,10 +3,11 @@ import asyncio
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.security import HTTPBearer
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from db.connection import get_session
-from db.models import UserDetails
+from db.models import ResumeChunk, UserDetails
 from db.schemas import ResumeFetchRequest, ResumeFetchResponse
 from db.vector_store import get_resume_chunk_points, get_resume_vector_point
 from helpers.auth_context import require_username
@@ -42,7 +43,18 @@ async def get_my_resume_profile(request: Request, session: AsyncSession = Depend
     if not user_details:
         raise HTTPException(status_code=404, detail="No resume profile found for this user")
 
-    return _profile_response(user_details)
+    sections = (
+        await session.execute(
+            select(ResumeChunk.section).where(ResumeChunk.username == username).order_by(ResumeChunk.chunk_index)
+        )
+    ).scalars().all()
+    return {
+        **_profile_response(user_details),
+        "sections": list(dict.fromkeys(sections)),  # unique, in CV order
+        "updated_at": user_details.updated_at,
+        "resume_source": user_details.resume_source,
+        "resume_filename": user_details.resume_filename,
+    }
 
 
 @router.get("/resume/me/qdrant", dependencies=[Depends(security)])
@@ -90,9 +102,16 @@ async def fetch_resume_profile(
     try:
         resume_text = payload.resume_text
         if not resume_text and payload.resume_url:
-            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
-                response = await client.get(payload.resume_url)
-                response.raise_for_status()
+            try:
+                async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                    response = await client.get(payload.resume_url)
+                    response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise ValueError(
+                    f"The link returned HTTP {exc.response.status_code}. Make sure it's public and points to the file itself."
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise ValueError("Couldn't download the CV from that link. Check that it's a public URL.") from exc
             resume_text = extract_resume_text(
                 response.content, filename=payload.resume_url, content_type=response.headers.get("Content-Type")
             )
@@ -102,7 +121,10 @@ async def fetch_resume_profile(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    user_details = await save_resume_profile(username, resume_text, session)
+    from_url = not payload.resume_text and bool(payload.resume_url)
+    user_details = await save_resume_profile(
+        username, resume_text, session, source="url" if from_url else "text", filename=payload.resume_url if from_url else None
+    )
 
     return _profile_response(user_details)
 
@@ -136,6 +158,6 @@ async def upload_resume_file(
     if not resume_text or not resume_text.strip():
         raise HTTPException(status_code=400, detail="Could not extract any text from the uploaded file")
 
-    user_details = await save_resume_profile(username, resume_text, session)
+    user_details = await save_resume_profile(username, resume_text, session, source="file", filename=file.filename)
 
     return _profile_response(user_details)

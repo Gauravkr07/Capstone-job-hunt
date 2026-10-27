@@ -214,11 +214,14 @@ def _parse_title_company_location(text: str) -> tuple[str | None, str | None, li
     return title, company, location
 
 
-async def parse_raw_job_posting(raw_text: str) -> dict[str, Any]:
+async def parse_raw_job_posting(raw_text: str, require_identity: bool = True) -> dict[str, Any]:
     """
     Parse a raw, unstructured job posting (e.g. pasted directly from a job
     board) into title/company/location plus everything scrape_job_description
     already extracts (skills, experience, industry, etc.).
+
+    With require_identity=False (one-off JD checks that aren't stored), a
+    missing title/company gets a placeholder instead of raising.
 
     Tries LLM-based extraction first (accurate on arbitrary real-world JD
     formatting) and falls back to the regex/keyword heuristics below when no
@@ -254,6 +257,10 @@ async def parse_raw_job_posting(raw_text: str) -> dict[str, Any]:
     company_name = (llm_result.get("company_name") if llm_result else None) or regex_company
     location = (llm_result.get("location") if llm_result else None) or regex_location
 
+    if not require_identity:
+        # A one-off JD check (nothing is stored) doesn't need a real title/company.
+        title = title or "This role"
+        company_name = company_name or "Unknown company"
     if not title:
         raise ValueError("Could not determine job title from the provided text")
     if not company_name:

@@ -1,94 +1,15 @@
 /*
- * JobHunt front door: sign in / create account, then a small home screen.
- * React 18 via UMD + htm for JSX-like templates -- no build step, served by
- * FastAPI from /static. Routes are hash-based (#/login, #/register, #/home)
- * so they never collide with the POST /login and POST /register API routes.
+ * JobHunt web app shell: sign in / create account, then the signed-in app
+ * (Home, My CV, Jobs; the chatbot is its own page at /chatbot). React 18 via UMD + htm for
+ * JSX-like templates -- no build step, served by FastAPI from /static.
+ * Shared pieces live in core.js, the signed-in pages in pages.js.
+ *
+ * Routes are hash-based (#/login, #/register, #/home, #/cv, #/jobs) so they never collide
+ * with the POST /login and POST /register API routes.
  */
 (function () {
   const { useState, useEffect, useCallback } = React;
-  const html = htm.bind(React.createElement);
-
-  // ---------------------------------------------------------------- session
-
-  const SESSION_KEY = "jobhunt_session";
-
-  function loadSession() {
-    try {
-      const session = JSON.parse(localStorage.getItem(SESSION_KEY) || "null");
-      if (session && session.jwt && session.expiresAt * 1000 > Date.now()) return session;
-    } catch (_) {
-      /* storage blocked or corrupt -- treat as signed out */
-    }
-    return null;
-  }
-
-  function saveSession(session) {
-    try {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
-      // The chatbot page reads this key to tag its conversations.
-      localStorage.setItem("jobhunt_username", session.username);
-    } catch (_) {
-      /* session still works for this page view */
-    }
-  }
-
-  function clearSession() {
-    try {
-      localStorage.removeItem(SESSION_KEY);
-    } catch (_) {}
-  }
-
-  // -------------------------------------------------------------------- api
-
-  class ApiError extends Error {
-    constructor(status, message, fieldErrors) {
-      super(message);
-      this.status = status;
-      this.fieldErrors = fieldErrors || {};
-    }
-  }
-
-  // FastAPI returns {detail: "msg"} for HTTPException and
-  // {detail: [{loc: [..., field], msg}]} for validation (422) errors.
-  function toApiError(status, body) {
-    const detail = body && (body.detail ?? body.message);
-    if (Array.isArray(detail)) {
-      const fieldErrors = {};
-      detail.forEach((item) => {
-        const field = item.loc ? item.loc[item.loc.length - 1] : "form";
-        fieldErrors[field] = (item.msg || "Invalid value").replace(/^Value error, /, "");
-      });
-      return new ApiError(status, "Please fix the highlighted fields.", fieldErrors);
-    }
-    if (typeof detail === "string") return new ApiError(status, detail);
-    return new ApiError(status, status >= 500 ? "The server had a problem. Try again shortly." : "Request failed.");
-  }
-
-  async function postJson(path, payload) {
-    let response;
-    try {
-      response = await fetch(path, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
-    } catch (_) {
-      throw new ApiError(0, "Can't reach the server. Check your connection and try again.");
-    }
-    let body = null;
-    try {
-      body = await response.json();
-    } catch (_) {}
-    if (!response.ok) throw toApiError(response.status, body);
-    return body;
-  }
-
-  async function login(username, password) {
-    const body = await postJson("/login", { username, password });
-    const session = { jwt: body.jwt, username: username.trim().toLowerCase(), expiresAt: body.jwt_expires_at };
-    saveSession(session);
-    return session;
-  }
+  const { html, api, login, loadSession, clearSession, Field, Switch, SubmitButton, Alert, ThemeToggle, pages } = window.JH;
 
   // ----------------------------------------------------------------- router
 
@@ -105,76 +26,6 @@
 
   function go(route) {
     window.location.hash = "#/" + route;
-  }
-
-  // ------------------------------------------------------------- primitives
-
-  function Field({ id, label, hint, error, type = "text", value, onChange, autoComplete, required, ...rest }) {
-    const [revealed, setRevealed] = useState(false);
-    const isPassword = type === "password";
-    return html`
-      <div className="field">
-        <label htmlFor=${id}>${label}${hint ? html` <span className="hint">${hint}</span>` : null}</label>
-        <div className="input-wrap">
-          <input
-            id=${id}
-            name=${id}
-            type=${isPassword && revealed ? "text" : type}
-            value=${value}
-            onChange=${(e) => onChange(e.target.value)}
-            autoComplete=${autoComplete}
-            required=${required}
-            aria-invalid=${error ? "true" : "false"}
-            aria-describedby=${error ? id + "-error" : undefined}
-            style=${isPassword ? { paddingRight: "64px" } : undefined}
-            ...${rest}
-          />
-          ${isPassword &&
-          html`<button
-            type="button"
-            className="reveal"
-            onClick=${() => setRevealed(!revealed)}
-            aria-label=${revealed ? "Hide password" : "Show password"}
-          >
-            ${revealed ? "Hide" : "Show"}
-          </button>`}
-        </div>
-        ${error && html`<span className="error" id=${id + "-error"}>${error}</span>`}
-      </div>
-    `;
-  }
-
-  function Switch({ id, label, help, checked, onChange }) {
-    return html`
-      <div className="switch-row">
-        <div>
-          <div className="label" id=${id + "-label"}>${label}</div>
-          ${help && html`<div className="help">${help}</div>`}
-        </div>
-        <button
-          type="button"
-          role="switch"
-          className="switch"
-          aria-checked=${checked ? "true" : "false"}
-          aria-labelledby=${id + "-label"}
-          onClick=${() => onChange(!checked)}
-        ></button>
-      </div>
-    `;
-  }
-
-  function SubmitButton({ busy, children }) {
-    return html`
-      <button type="submit" className="btn" disabled=${busy} aria-busy=${busy ? "true" : "false"}>
-        ${busy && html`<span className="spinner" aria-hidden="true"></span>`}
-        ${children}
-      </button>
-    `;
-  }
-
-  function Alert({ kind = "error", children }) {
-    if (!children) return null;
-    return html`<div className=${"alert " + kind} role=${kind === "error" ? "alert" : "status"}>${children}</div>`;
   }
 
   // -------------------------------------------------------------- auth pages
@@ -264,7 +115,7 @@
       setError("");
       const optional = (v) => (v && v.trim() ? v.trim() : null);
       try {
-        await postJson("/register", {
+        await api("/register", { auth: false, json: {
           username: form.username.trim(),
           password: form.password,
           full_name: optional(form.full_name),
@@ -274,8 +125,8 @@
           linkedin_url: showLinks ? optional(form.linkedin_url) : null,
           leetcode_url: showLinks ? optional(form.leetcode_url) : null,
           hackerrank_url: showLinks ? optional(form.hackerrank_url) : null,
-        });
-        // Account created -- sign straight in so the user lands on home.
+        } });
+        // Account created -- sign straight in.
         onSignedIn(await login(form.username, form.password));
       } catch (err) {
         if (err.status === 400 && /exists/i.test(err.message)) {
@@ -347,7 +198,8 @@
         </aside>
 
         <main className="panel">
-          <div className="card">
+          <${ThemeToggle} />
+          <div className="auth-card">
             <div className="logo mobile-logo">Job<span>Hunt</span></div>
             <div className="card-head">
               <h2>${isLogin ? "Welcome back" : "Create your account"}</h2>
@@ -366,86 +218,84 @@
     `;
   }
 
-  // -------------------------------------------------------------------- home
+  // ------------------------------------------------------- signed-in shell
 
-  function Home({ session, onSignOut }) {
-    useEffect(() => {
-      document.title = "JobHunt";
-    }, []);
+  // `hidden` routes are reachable (the logo goes Home) but not shown as tabs.
+  const NAV = [
+    { route: "home", label: "Home", page: pages.HomePage, hidden: true },
+    { route: "cv", label: "My CV", page: pages.CvPage },
+    { route: "jobs", label: "Jobs", page: pages.JobsPage },
+  ];
+  // Signing in lands on Home, where the user picks My CV, Jobs or Chatbot.
+  const DEFAULT_ROUTE = "home";
 
-    const tiles = [
-      { href: "/docs", title: "My CV and matches", body: "Upload your CV and get job matches. Available in the API explorer for now.", cta: "Open API explorer" },
-      { href: "/chatbot", title: "Profile assistant", body: "Ask questions about the candidate profile and resume.", cta: "Open assistant" },
-      { href: "/upload", title: "Post a job", body: "Paste a raw job description to add it to the shared job pool.", cta: "Post a job" },
-    ];
-
+  function Shell({ route, session, onSignOut }) {
+    const current = NAV.find((n) => n.route === route) || NAV.find((n) => n.route === DEFAULT_ROUTE);
+    const Page = current.page;
     return html`
-      <div className="home">
-        <header className="topbar">
-          <div className="logo">Job<span>Hunt</span></div>
+      <div className="shell">
+        <header className="appbar">
+          <a className="logo" href="#/home">Job<span>Hunt</span></a>
+          <nav className="appnav" aria-label="Main">
+            ${NAV.filter((n) => !n.hidden).map(
+              (n) => html`<a key=${n.route} href=${"#/" + n.route} aria-current=${n === current ? "page" : undefined}>${n.label}</a>`
+            )}
+          </nav>
           <div className="who">
+            <${ThemeToggle} />
             <div className="avatar" aria-hidden="true">${session.username.charAt(0).toUpperCase()}</div>
-            <span>${session.username}</span>
-            <button type="button" className="btn secondary" onClick=${onSignOut}>Sign out</button>
+            <span className="who-name">${session.username}</span>
+            <button type="button" className="btn secondary small" onClick=${onSignOut}>Sign out</button>
           </div>
         </header>
-        <div>
-          <h1>Hi, ${session.username}</h1>
-          <p className="lead">You're signed in. Pick where to go next.</p>
-        </div>
-        <div className="tiles">
-          ${tiles.map(
-            (t) => html`<a className="tile" href=${t.href} key=${t.href}>
-              <strong>${t.title}</strong>
-              <span>${t.body}</span>
-              <span className="go">${t.cta} →</span>
-            </a>`
-          )}
-        </div>
+        <main className="page" id="main">
+          <${Page} key=${current.route} session=${session} />
+        </main>
       </div>
     `;
   }
 
   // --------------------------------------------------------------------- app
 
+  const AUTH_ROUTES = ["login", "register"];
+
   function App() {
     const route = useHashRoute();
     const [session, setSession] = useState(loadSession);
     const [notice, setNotice] = useState("");
 
-    // Expire the session in place when the JWT runs out.
-    useEffect(() => {
-      if (!session) return undefined;
-      const ms = session.expiresAt * 1000 - Date.now();
-      const timer = setTimeout(() => {
-        clearSession();
-        setSession(null);
-        setNotice("Your session expired. Sign in again.");
-        go("login");
-      }, Math.max(ms, 0));
-      return () => clearTimeout(timer);
-    }, [session]);
-
-    // Signed-in users skip the auth pages; signed-out users can't see home.
-    useEffect(() => {
-      if (session && route !== "home") go("home");
-      if (!session && route !== "login" && route !== "register") go("login");
-    }, [route, session]);
-
-    function onSignedIn(next) {
-      setNotice("");
-      setSession(next);
-      go("home");
-    }
-
-    function onSignOut() {
+    const endSession = useCallback((message) => {
       clearSession();
       setSession(null);
-      setNotice("You've signed out.");
+      setNotice(message);
       go("login");
+    }, []);
+
+    // Expire the session in place when the JWT runs out, or when the API says it's no longer valid.
+    useEffect(() => {
+      if (!session) return undefined;
+      const timer = setTimeout(() => endSession("Your session expired. Sign in again."), Math.max(session.expiresAt * 1000 - Date.now(), 0));
+      const onUnauthorized = () => endSession("Your session expired. Sign in again.");
+      window.addEventListener("jobhunt:unauthorized", onUnauthorized);
+      return () => {
+        clearTimeout(timer);
+        window.removeEventListener("jobhunt:unauthorized", onUnauthorized);
+      };
+    }, [session, endSession]);
+
+    // Signed-in users skip the auth pages; signed-out users only see them.
+    useEffect(() => {
+      if (session && (AUTH_ROUTES.includes(route) || !NAV.some((n) => n.route === route))) go(DEFAULT_ROUTE);
+      if (!session && !AUTH_ROUTES.includes(route)) go("login");
+    }, [route, session]);
+
+    function onSignedIn(next, landing = DEFAULT_ROUTE) {
+      setNotice("");
+      setSession(next);
+      go(landing);
     }
 
-    if (session) return html`<${Home} session=${session} onSignOut=${onSignOut} />`;
+    if (session) return html`<${Shell} route=${route} session=${session} onSignOut=${() => endSession("You've signed out.")} />`;
     return html`<${AuthPage} mode=${route === "register" ? "register" : "login"} onSignedIn=${onSignedIn} notice=${notice} />`;
   }
 

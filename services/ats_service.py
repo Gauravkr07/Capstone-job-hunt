@@ -21,18 +21,24 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from db.models import Job
+from db.models import Job, JobMatch, User
 from db.vector_store import (
     get_job_vector_point,
     get_job_vector_points,
     get_resume_vector_point,
     search_resume_chunks,
+    search_resume_profiles,
     search_similar_jobs,
 )
+from helpers.embeddings import embed_text
 from helpers.llm_match_explainer import explain_match_via_llm
-from services.job_service import fetch_job_skills
+from helpers.logger import get_logger
+from services.job_service import fetch_job_skills, job_embedding_text
+
+logger = get_logger("ats_service")
 
 # How many resume chunks to retrieve as grounding context for a match
 # explanation -- enough for a well-rounded answer without bloating the LLM prompt.
@@ -41,7 +47,10 @@ EXPLAIN_MATCH_CHUNK_LIMIT = 5
 # Recommendations retrieval: how many candidates to pull from vector search
 # before reranking by fused score. Wider than the final returned list so
 # reranking has enough candidates to actually reorder.
-RECOMMENDATION_RETRIEVAL_LIMIT = 50
+RECOMMENDATION_RETRIEVAL_LIMIT = 200
+
+# When a job is added, how many of the most similar CVs are scored against it.
+CANDIDATE_POOL_LIMIT = 500
 
 # Fusion weights -- must sum to 1.0. Skill overlap is weighted higher than
 # raw vector similarity because it reflects literal, checkable requirements.
@@ -175,29 +184,25 @@ async def _load_job_context(
 
 
 async def _generate_match_explanation(
-    job: Job,
-    job_point: dict[str, Any],
+    job_vector: list[float],
+    job_title: str,
+    company_name: str,
     username: str,
     required_skills: list[str],
     preferred_skills: list[str],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """
-    Shared RAG core used by both explain_match() and compute_ats_match(...,
-    include_explanation=True): retrieve the resume chunks most relevant to
-    this job (vector search over resume_chunks, scoped to this user), then
-    ask Groq to generate a grounded natural-language explanation using only
-    those retrieved chunks plus the job's required/preferred skills.
+    Shared RAG core used by explain_match(), compute_ats_match(...,
+    include_explanation=True) and analyze_job_description(): retrieve the
+    resume chunks most relevant to this job (vector search over resume_chunks,
+    scoped to this user), then ask Groq to generate a grounded natural-language
+    explanation using only those retrieved chunks plus the job's skills.
 
     Returns (explanation_or_none, retrieved_chunks). explanation is None if
     no LLM is configured or the call failed -- retrieved_chunks are still
     returned so the caller has the raw evidence either way.
     """
-    chunks = await asyncio.to_thread(
-        search_resume_chunks, job_point["vector"], EXPLAIN_MATCH_CHUNK_LIMIT, username
-    )
-
-    job_title = job_point["payload"].get("title", job.title)
-    company_name = job_point["payload"].get("company", "")
+    chunks = await asyncio.to_thread(search_resume_chunks, job_vector, EXPLAIN_MATCH_CHUNK_LIMIT, username)
 
     explanation = await explain_match_via_llm(job_title, company_name, required_skills, preferred_skills, chunks)
 
@@ -206,6 +211,13 @@ async def _generate_match_explanation(
         for chunk in chunks
     ]
     return explanation, retrieved_chunks
+
+
+async def _explain_stored_job(job: Job, job_point: dict[str, Any], username: str, required: list[str], preferred: list[str]):
+    payload = job_point["payload"]
+    return await _generate_match_explanation(
+        job_point["vector"], payload.get("title", job.title), payload.get("company", ""), username, required, preferred
+    )
 
 
 async def compute_ats_match(
@@ -240,7 +252,7 @@ async def compute_ats_match(
     )
 
     if include_explanation:
-        result.explanation, result.retrieved_chunks = await _generate_match_explanation(
+        result.explanation, result.retrieved_chunks = await _explain_stored_job(
             job, job_point, username, required_skills, preferred_skills
         )
 
@@ -259,41 +271,161 @@ async def explain_match(session: AsyncSession, username: str, job_id: int) -> di
     """
     job, job_point, _, required_skills, preferred_skills = await _load_job_context(session, username, job_id)
 
-    explanation, retrieved_chunks = await _generate_match_explanation(
+    explanation, retrieved_chunks = await _explain_stored_job(
         job, job_point, username, required_skills, preferred_skills
     )
     return {"explanation": explanation, "retrieved_chunks": retrieved_chunks}
 
 
-async def get_job_recommendations(session: AsyncSession, username: str, limit: int = 10) -> list[AtsMatchResult]:
-    """
-    Recommend jobs for a user's resume: retrieve a candidate pool via vector
-    similarity search (fast, broad recall across job_postings), then rerank
-    that pool by the same fused vector+skill-overlap score used for a single
-    ATS check (precise, but too expensive to run against every job in the
-    collection) -- so the final order reflects actual likely fit, not just
-    raw semantic similarity.
+def _to_match_row(username: str, result: AtsMatchResult) -> JobMatch:
+    return JobMatch(
+        username=username,
+        job_id=result.job_id,
+        vector_score=result.vector_score,
+        skill_score=result.skill_score,
+        fused_score=result.fused_score,
+        has_skill_data=result.has_skill_data,
+        matched_required_skills=result.matched_required_skills,
+        missing_required_skills=result.missing_required_skills,
+        matched_preferred_skills=result.matched_preferred_skills,
+        missing_preferred_skills=result.missing_preferred_skills,
+    )
 
-    Returns results sorted by fused_score descending, highest-likelihood
-    matches first. Raises ValueError if the caller has no resume yet.
+
+def _from_match_row(row: JobMatch) -> AtsMatchResult:
+    return AtsMatchResult(
+        job_id=row.job_id,
+        vector_score=row.vector_score,
+        skill_score=row.skill_score,
+        fused_score=row.fused_score,
+        has_skill_data=row.has_skill_data,
+        matched_required_skills=row.matched_required_skills or [],
+        missing_required_skills=row.missing_required_skills or [],
+        matched_preferred_skills=row.matched_preferred_skills or [],
+        missing_preferred_skills=row.missing_preferred_skills or [],
+    )
+
+
+async def refresh_matches_for_user(session: AsyncSession, username: str) -> int:
     """
-    resume_point = await _require_resume_point(username)
+    Recompute and store (job_matches) how this user's CV scores against the
+    active jobs most similar to it. Called whenever the user's CV changes, so
+    old matches never outlive the CV they were computed from. Two-stage:
+    vector search pulls the RECOMMENDATION_RETRIEVAL_LIMIT nearest jobs, then
+    each is rescored with the hybrid vector + skill-overlap formula.
+    """
+    await session.execute(delete(JobMatch).where(JobMatch.username == username))
+
+    resume_point = await asyncio.to_thread(get_resume_vector_point, username)
+    if not resume_point:
+        await session.commit()
+        return 0
     resume_skills = set(resume_point["payload"].get("skills") or [])
 
     candidates = await asyncio.to_thread(
         search_similar_jobs, resume_point["vector"], RECOMMENDATION_RETRIEVAL_LIMIT, "ACTIVE"
     )
-    candidate_job_ids = [candidate["job_id"] for candidate in candidates]
+    job_ids = [c["job_id"] for c in candidates]
+    # Only jobs that still exist in Postgres (the source of truth).
+    job_ids = list((await session.execute(select(Job.id).where(Job.id.in_(job_ids)))).scalars())
+    job_points = await asyncio.to_thread(get_job_vector_points, job_ids)
+    skills = await fetch_job_skills(session, job_ids)
 
-    # Batched lookups: one Qdrant retrieve + one Postgres query for the whole
-    # candidate pool, instead of two round-trips per candidate.
-    job_vector_points = await asyncio.to_thread(get_job_vector_points, candidate_job_ids)
-    job_skills_by_id = await fetch_job_skills(session, candidate_job_ids)
-
-    results = [
-        _score_match(job_id, resume_point["vector"], resume_skills, job_vector_points[job_id]["vector"], *job_skills_by_id[job_id])
-        for job_id in candidate_job_ids
-        if job_id in job_vector_points
+    rows = [
+        _to_match_row(username, _score_match(job_id, resume_point["vector"], resume_skills, job_points[job_id]["vector"], *skills[job_id]))
+        for job_id in job_ids
+        if job_id in job_points
     ]
-    results.sort(key=lambda r: r.fused_score, reverse=True)
-    return results[:limit]
+    session.add_all(rows)
+    await session.commit()
+    logger.info("Stored %d job matches for %s", len(rows), username)
+    return len(rows)
+
+
+async def refresh_matches_for_job(session: AsyncSession, job_id: int) -> int:
+    """
+    Score one (new or changed) job against every user's CV and store the
+    results, so it appears in each matching user's recommendations straight
+    away -- without waiting for them to re-upload their CV.
+    """
+    job_point = await asyncio.to_thread(get_job_vector_point, job_id)
+    await session.execute(delete(JobMatch).where(JobMatch.job_id == job_id))
+    if not job_point:
+        await session.commit()
+        return 0
+
+    required, preferred = (await fetch_job_skills(session, [job_id]))[job_id]
+    profiles = await asyncio.to_thread(search_resume_profiles, job_point["vector"], CANDIDATE_POOL_LIMIT)
+    usernames = [p["payload"].get("username") for p in profiles]
+    known = set((await session.execute(select(User.username).where(User.username.in_(usernames)))).scalars())
+
+    rows = [
+        _to_match_row(
+            p["payload"]["username"],
+            _score_match(job_id, p["vector"], set(p["payload"].get("skills") or []), job_point["vector"], required, preferred),
+        )
+        for p in profiles
+        if p["payload"].get("username") in known
+    ]
+    session.add_all(rows)
+    await session.commit()
+    logger.info("Stored %d candidate matches for job %s", len(rows), job_id)
+    return len(rows)
+
+
+async def get_job_recommendations(
+    session: AsyncSession, username: str, limit: int = 10, min_score: float = 0.0
+) -> list[AtsMatchResult]:
+    """
+    The user's stored recommendations (job_matches) for ACTIVE jobs, best
+    fused_score first. If none are stored yet (e.g. data from before matches
+    were persisted), they're computed once and stored. Raises ValueError if
+    the user has no CV.
+    """
+
+    async def read() -> list[AtsMatchResult]:
+        rows = await session.execute(
+            select(JobMatch)
+            .join(Job, Job.id == JobMatch.job_id)
+            .where(JobMatch.username == username, Job.status == "ACTIVE", JobMatch.fused_score >= min_score)
+            .order_by(JobMatch.fused_score.desc())
+            .limit(limit)
+        )
+        return [_from_match_row(r) for r in rows.scalars()]
+
+    results = await read()
+    if results:
+        return results
+
+    has_any = (await session.execute(select(JobMatch.id).where(JobMatch.username == username).limit(1))).first()
+    if not has_any:
+        await _require_resume_point(username)  # raises ValueError when there's no CV
+        await refresh_matches_for_user(session, username)
+        results = await read()
+    return results
+
+
+async def analyze_job_description(username: str, parsed: dict[str, Any], include_explanation: bool = True) -> AtsMatchResult:
+    """
+    Score the caller's resume against a job description that is NOT stored
+    (the "check a JD" feature): same embedding text, scoring and explanation
+    as a stored job, computed in memory. `parsed` is the output of
+    helpers.jd_scraper.parse_raw_job_posting. job_id is 0 on the result.
+    """
+    resume_point = await _require_resume_point(username)
+    required, preferred = parsed["required_skills"], parsed["preferred_skills"]
+    job_vector = await asyncio.to_thread(
+        embed_text,
+        job_embedding_text(
+            parsed["title"], parsed["company_name"], parsed["skills"], parsed["industry_type"], parsed["cleaned_description"]
+        ),
+    )
+
+    result = _score_match(
+        0, resume_point["vector"], set(resume_point["payload"].get("skills") or []), job_vector, required, preferred
+    )
+    if include_explanation:
+        result.explanation, result.retrieved_chunks = await _generate_match_explanation(
+            job_vector, parsed["title"], parsed["company_name"], username, required, preferred
+        )
+    return result
