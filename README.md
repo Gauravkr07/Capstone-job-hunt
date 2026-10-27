@@ -1,9 +1,52 @@
 # Capstone Job Hunt
 
-FastAPI backend for a resume-vs-job matching (ATS-style) system. It ingests
-resumes and job postings, extracts structured data (skills, experience,
-industry, location, etc.) from each, embeds both into a shared vector space,
-and scores/ranks job matches against a candidate's resume.
+A resume-vs-job matching (ATS-style) platform with a web app and a "talk to my
+CV" chatbot. Users register, upload their CV (file, pasted text or link), and
+get job recommendations ranked by how well the CV fits each opening. The
+backend ingests resumes and job postings, extracts structured data (skills,
+experience, industry, location, etc.), embeds both into a shared vector space,
+and scores matches. Recruiters can chat with an AI that answers from a
+candidate's CV.
+
+---
+
+## Screenshots
+
+### Jobs: recommended for you
+
+Jobs from the shared pool where the signed-in user's CV scores 45% or higher,
+with the score, the skills the user has, and the gaps.
+
+![Jobs page showing recommended jobs with match score, skills you have and skill gaps](ui-views/job-section.png)
+
+| Used by this screen | Endpoint |
+|---|---|
+| Recommended tab | `GET /jobs/recommendations?limit=50&min_score=0.45` |
+| "Why this match?" | `POST /jobs/explainMatch` |
+| All open jobs tab | `GET /jobs?status=ACTIVE` |
+
+### Personal chatbot
+
+A public "talk to my CV" chat for recruiters. It answers in the candidate's
+voice, only from their CV, and declines off-topic questions.
+
+![Chatbot answering questions about the candidate's projects](ui-views/personal-chatbot.png)
+
+| Used by this screen | Endpoint |
+|---|---|
+| Header (candidate name) | `GET /chatbot/user-details` |
+| Send a message (streamed answer) | `POST /chat/stream` |
+| Conversation list / reopen | `GET /chat/conversations`, `GET /chat/conversations/{id}` |
+
+Other web app screens and the API each one calls:
+
+| Screen | Endpoints |
+|---|---|
+| Sign in / Create account | `POST /login`, `POST /register` |
+| Home (My CV · Jobs · Chatbot) | `GET /jobs/resume/me`, `GET /jobs/recommendations`, `GET /me` |
+| My CV: upload file | `POST /jobs/resume/upload` |
+| My CV: paste text or link | `POST /jobs/resume` |
+| My CV: current CV card | `GET /jobs/resume/me` |
 
 ---
 
@@ -81,17 +124,20 @@ This builds and starts three containers:
 
 ### Verify it's running
 
-- `http://localhost:8000/` — the web app's front door: a React sign-in /
-  create-account page (`static/index.html` + `static/app.js`, no build step;
-  React 18 and `htm` are vendored in `static/vendor/`, so no CDN is needed). Routes are hash-based (`#/login`,
-  `#/register`, `#/home`) so they never clash with the `POST /login` and
-  `POST /register` API routes. The JWT is kept in `localStorage`.
+- `http://localhost:8000/` — the web app: a React sign-in / create-account
+  page that opens a home screen (My CV, Jobs, Chatbot) after sign-in
+  (`static/index.html`, `core.js`, `pages.js`, `app.js`; no build step; React 18
+  and `htm` are vendored in `static/vendor/`, so no CDN is needed). Routes are
+  hash-based (`#/login`, `#/register`, `#/home`, `#/cv`, `#/jobs`) so they never
+  clash with the `POST /login` and `POST /register` API routes. The JWT is kept
+  in `localStorage`, and every request from the app sends it automatically.
+  Dark is the default theme, with a day/night toggle.
+- `http://localhost:8000/chatbot` — the public chatbot (see section 6b).
 - `GET http://localhost:8000/health` — liveness check (`{"status": "ok"}`).
-- `http://localhost:8000/docs` — interactive Swagger UI, lists every endpoint
-  with a "Try it out" form (handles JSON encoding for you — no manual escaping
-  needed, unlike hand-built `curl` commands).
+- `http://localhost:8000/docs` — interactive Swagger UI. If you're signed in to
+  the web app, "Try it out" is already authorized with your token.
 - `http://localhost:8000/upload` — a minimal HTML page for pasting raw job
-  posting text and submitting it without touching JSON at all.
+  posting text without touching JSON (reuses the web app's sign-in).
 
 ### Stopping / rebuilding
 
@@ -183,7 +229,9 @@ detected by filename extension or content-type. Returns the same
 ### `GET /jobs/resume/me`
 
 Returns the caller's own stored resume profile (`ResumeFetchResponse` shape,
-same fields as above). 404 if the caller has never submitted a resume.
+same fields as above, plus `sections` (the CV sections found), `updated_at`,
+`resume_source` (`file` / `text` / `url`) and `resume_filename`). 404 if the
+caller has never submitted a resume.
 
 ### `GET /jobs/resume/me/qdrant`
 
@@ -288,7 +336,7 @@ the survivors. Query: `limit` (1–200, default 25). Returns
 
 ### `GET /jobs`
 
-List job postings from Postgres, newest first. **Public — no auth required.**
+List job postings from Postgres, newest first. Requires a Bearer JWT.
 
 | Query param | Type | Default | Notes |
 |---|---|---|---|
@@ -298,21 +346,6 @@ List job postings from Postgres, newest first. **Public — no auth required.**
 | `offset` | integer | 0 | |
 
 **Response (`JobListResponse`):** `{total, limit, offset, jobs: [JobResponse, ...]}`
-
-### `GET /jobs/{job_id}`
-
-Single job detail by ID, including joined required/preferred skills.
-Returns `JobResponse`. 404 if not found.
-
-### `GET /jobs/{job_id}/qdrant`
-
-Debug endpoint. Direct Qdrant point lookup for that job (not a similarity
-search): `{job_id, point: {id, vector, payload} or null}`.
-
-### `GET /jobs/user`
-
-Debug endpoint only — echoes the authenticated JWT payload. Not
-job-data-related; kept for auth troubleshooting.
 
 ---
 
@@ -387,6 +420,20 @@ retrieval-for-ranking like the endpoints above):**
 explanation logic (it would mean one LLM call per candidate, up to 50 per
 request) — it only uses the fast numeric scoring.
 
+### `POST /jobs/analyzeJd`
+
+Paste any job description and get the caller's match score, matched and
+missing skills, and an optional grounded explanation, **without storing the
+job**. Set `save_to_pool: true` to also add it to the shared pool.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `raw_text` | string | required | 30 to 30,000 characters. |
+| `save_to_pool` | boolean | `false` | When `true`, the job is stored (deduplicated) and scored for every candidate. |
+| `include_explanation` | boolean | `true` | Adds the AI explanation. |
+
+**Response:** `{job: {title, company_name, ...skills}, saved_job_id, match: AtsCheckResponse}`.
+
 ### `GET /jobs/recommendations`
 
 Recommend active job postings for the caller's resume, ranked by likely fit
@@ -395,8 +442,11 @@ Recommend active job postings for the caller's resume, ranked by likely fit
 | Query param | Type | Default | Notes |
 |---|---|---|---|
 | `limit` | integer | 10 | 1–50. |
+| `min_score` | float | 0 | Only return jobs with `fused_score >= min_score` (the web app uses `0.45`). |
 
-Two-stage retrieval + rerank: (1) vector similarity search across all
+Recommendations are read from the stored `job_matches` table (see section 7):
+they're recomputed for a user whenever their CV changes, and scored for every
+user when a job is added. The scoring is two-stage retrieval + rerank: (1) vector similarity search across all
 `ACTIVE` jobs pulls a wide candidate pool (up to 50) for recall, (2) each
 candidate is rescored with the same hybrid formula as `/jobs/atsCheck` and
 sorted by `fused_score` descending. Both Qdrant and Postgres lookups for the
@@ -412,20 +462,35 @@ regardless of pool size.
 
 ## 6b. Candidate Chatbot (`/chatbot`)
 
-A public "talk to my CV" page for recruiters. It answers in the first person
-as the candidate (`CHATBOT_LOCKED_USERNAME` in `routers/chatbot_flow.py`),
-only what was asked, and declines off-topic requests. Built as a LangGraph
-graph in `helpers/chatbot_rag.py`:
+A public "talk to my CV" page for recruiters, open to anyone with the link. It
+answers in the first person as the candidate, only what was asked, and
+declines off-topic requests. Built as a LangGraph graph in
+`helpers/chatbot_rag.py`.
 
+- **Whose CV:** plain `/chatbot` answers from `CHATBOT_DEFAULT_USERNAME` (env,
+  default `gaurav66`), so a shared link never changes. Every other registered
+  user's bot is at `/chatbot?u=<username>` (shown on Home and My CV).
 - **Small talk** ("hi", "thanks", "bye") gets a short reply with no retrieval.
-- **Questions**: CV sections from Qdrant first; if Qdrant is unreachable, the
-  embedding model isn't loaded, or nothing relevant comes back, the same
-  sections are read from Postgres. Groq writes the answer (falling back to
-  `GROQ_FALLBACK_MODEL` on rate limits, then to rule-based answers).
-- **Recruiter contact**: an email or phone number in a message is saved to
+- **Questions:** CV chunks are scored by vector similarity (Qdrant), keyword
+  overlap and a boost for the section the question is about, then the best few
+  go to Groq (falling back to `GROQ_FALLBACK_MODEL` on rate limits, then to
+  rule-based answers). Questions about projects send every job and project
+  entry, so both work projects and personal projects are listed.
+- **Chunking:** CVs are split by section heading (Experience, Education,
+  Skills, ...) and long sections per job or project, each continuation chunk
+  keeping its company or project line (`helpers/resume_chunker.py`).
+- **Recruiter contact:** an email or phone number in a message is saved to
   `chat_leads`; set `LEAD_WEBHOOK_URL` (Slack/Discord webhook) to be pinged.
-- Every turn is logged to `chat_messages`. Read leads and conversations with
-  `GET /owner/chat-inbox` (candidate's JWT only).
+- **Inbox:** every turn is logged to `chat_messages`. Each user reads their own
+  leads and conversations with `GET /owner/chat-inbox` (their JWT only).
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /chatbot/user-details?u=` | Candidate name and whether a CV exists |
+| `POST /chat/stream` | Send a message; server-sent events `meta`, `token`, `done` |
+| `GET /chat/conversations` | Conversations of the current visitor |
+| `GET /chat/conversations/{id}` | One conversation's messages |
+| `GET /owner/chat-inbox` | The signed-in user's recruiter contacts and chat log |
 
 **Rebuilding Qdrant from Postgres** (e.g. after switching to a new cluster):
 
@@ -473,18 +538,12 @@ leads and conversations at `GET /owner/chat-inbox`.
 
 ## 8. Known Follow-ups
 
-- **CPU-only torch** — the Docker image currently pulls the full
-  CUDA-enabled `torch` build via `sentence-transformers`, downloading unused
-  GPU/nvidia-* packages. Switching to the CPU-only wheel would shrink the
-  image and speed up cold builds.
 - **`JWT_SECRET_KEY`** now comes from `dev.env`, but falls back to an insecure
   placeholder if unset — always set it in production.
 - **Chat memory is in-process** (LangGraph `InMemorySaver`): lost on restart and
   not shared across replicas. Swap in a Postgres checkpointer to persist it.
 - **Skill/industry keyword taxonomy** (`helpers/constant.py`) is manually
   curated and English-only.
-- **`GET /jobs` has no auth dependency** — confirm this is intentional
-  before relying on it as access-controlled.
 - **Hybrid search (BM25 + vector) and reranking beyond the current
   skill-overlap formula** are deferred — the current fused-score approach
   covers the core use case; revisit if match quality needs improvement at
